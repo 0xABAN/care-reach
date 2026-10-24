@@ -7,12 +7,12 @@
   "2": {
     "lower": 903,
     "upper": 3223,
-    "scale": 1
+    "scale": 8
   },
   "3": {
     "lower": 881,
     "upper": 2987,
-    "scale": 1
+    "scale": 8
   },
   "4": {
     "lower": 863,
