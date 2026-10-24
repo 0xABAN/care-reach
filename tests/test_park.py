@@ -89,22 +89,15 @@ class ParkTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "different robot"):
             folded_target(self.pose_path)
 
-    def test_execute_uses_measured_feedback_runner_and_park_bounds(self):
+    def test_execute_refuses_fold_without_opening_bus(self):
         with patch("measured_pose_runner.MeasuredPoseRunner") as runner_type:
-            runner_type.return_value.move.return_value = {
-                "elapsed_s": 1.2,
-                "positions": dict(zip(JOINT_NAMES, folded_target(self.pose_path), strict=True)),
-            }
-            self.assertEqual(main([
-                "--execute", "--port", "fake", "--settings", str(self.settings_path),
-                "--calibration", str(self.calibration_path), "--pose", str(self.pose_path),
-            ]), 0)
-        self.assertEqual(runner_type.call_args.args[0], "fake")
-        task_bounds = runner_type.call_args.args[1]
-        self.assertEqual(task_bounds.lower[1], 893)
-        self.assertEqual(task_bounds.upper[2], 3065)
-        self.assertEqual(runner_type.return_value.move.call_args.args[0], folded_target(self.pose_path))
-        self.assertEqual(runner_type.return_value.move.call_args.kwargs["max_lead"], 80)
+            with self.assertRaises(SystemExit) as exit_result:
+                main([
+                    "--execute", "--port", "fake", "--settings", str(self.settings_path),
+                    "--calibration", str(self.calibration_path), "--pose", str(self.pose_path),
+                ])
+            self.assertEqual(exit_result.exception.code, 2)
+        runner_type.assert_not_called()
 
 
 if __name__ == "__main__":

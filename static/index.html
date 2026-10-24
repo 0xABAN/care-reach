@@ -64,13 +64,13 @@
     </nav>
     <section id="controls-panel" role="tabpanel" aria-labelledby="tab-controls">
     <div class="top">
-      <div><h1>SO-101 Joint Control</h1><p class="subtitle muted">Hold a direction to move any joint. Release to hold its measured position.</p><p class="subtitle muted" id="folded-pose"></p></div>
-      <div class="top-actions"><button class="pose" id="pose-home">Home</button><button class="pose" id="pose-fold">Fold</button><button class="pose" id="pose-dance">Dance</button><button class="hold-all" id="hold-all">Hold all joints</button><button class="release" id="release" disabled title="Set and verify the coiled rest pose first">Torque release unavailable</button></div>
+      <div><h1>SO-101 Joint Control</h1><p class="subtitle muted">Hold a direction to move any joint. Release to hold its measured position.</p><p class="subtitle muted" id="extended-pose"></p></div>
+      <div class="top-actions"><button class="pose" id="pose-home">Home / Retract</button><button class="pose" id="pose-extend">Extend</button><button class="pose" id="pose-dance">Dance</button><button class="hold-all" id="hold-all">Hold all joints</button><button class="release" id="release" disabled title="Torque release is unavailable">Torque release unavailable</button></div>
     </div>
     <div id="status" class="status">Connecting to the arm…</div>
     <details class="history"><summary>Recent power and servo events</summary><ul id="fault-history"><li>Loading…</li></ul></details>
     <div id="joints" class="grid"></div>
-    <p class="hint muted">Forward increases encoder ticks. Saved joint limits are shown read-only; hold speed is 1×, 2×, 4×, or 8×. Closing the gripper keeps a bounded inward hold when released. Home, Fold, and Dance move all six joints; Dance homes first and returns Home. Press the active button again to cancel. Torque remains on when a hold ends or this panel closes.</p>
+    <p class="hint muted">Forward increases encoder ticks. Saved joint limits are shown read-only; hold speed is 1×, 2×, 4×, or 8×. Closing the gripper keeps a bounded inward hold when released. Home is the retracted pose; Extend is the camera-safe upright pose. Dance homes first and returns Home. Press an active pose button again to cancel. Torque remains on when a hold ends or this panel closes.</p>
     </section>
     <section id="camera-panel" role="tabpanel" aria-labelledby="tab-camera" hidden>
       <h1>Live camera</h1>
@@ -226,16 +226,16 @@
           }
         }
         const faulted = state.motors.filter(m => m.fault).map(m => m.id);
-        if (state.folded_ticks) document.getElementById('folded-pose').textContent =
-          `Saved folded ticks 1–6: ${Object.values(state.folded_ticks).join(' · ')}`;
+        if (state.extended_ticks) document.getElementById('extended-pose').textContent =
+          `Saved upright ticks 1–6: ${Object.values(state.extended_ticks).join(' · ')}`;
         const homeBtn = document.getElementById('pose-home');
-        const foldBtn = document.getElementById('pose-fold');
+        const extendBtn = document.getElementById('pose-extend');
         const danceBtn = document.getElementById('pose-dance');
         homeBtn.disabled = !state.pose_enabled || (poseActive && pose.name !== 'home');
-        foldBtn.disabled = !state.pose_enabled || (poseActive && pose.name !== 'fold');
+        extendBtn.disabled = !state.pose_enabled || (poseActive && pose.name !== 'extend');
         danceBtn.disabled = !state.pose_enabled || (poseActive && pose.name !== 'dance');
         homeBtn.classList.toggle('active', poseActive && pose.name === 'home');
-        foldBtn.classList.toggle('active', poseActive && pose.name === 'fold');
+        extendBtn.classList.toggle('active', poseActive && pose.name === 'extend');
         danceBtn.classList.toggle('active', poseActive && pose.name === 'dance');
         document.getElementById('hold-all').disabled = !state.hold_all_enabled || poseActive;
         if (state.error) show(state.error, true);
@@ -256,7 +256,7 @@
       } catch (error) { show(error.message, true); }
     }
     document.getElementById('pose-home').addEventListener('click', () => togglePose('home'));
-    document.getElementById('pose-fold').addEventListener('click', () => togglePose('fold'));
+    document.getElementById('pose-extend').addEventListener('click', () => togglePose('extend'));
     document.getElementById('pose-dance').addEventListener('click', () => togglePose('dance'));
     document.getElementById('release').addEventListener('click', async () => {
       endPress();

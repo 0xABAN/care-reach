@@ -1,0 +1,12 @@
+{
+  "robot_id": "care_reach_follower",
+  "capture_method": "SO-101 URDF upright solution, physically confirmed by Lance on 2026-10-24",
+  "positions_ticks": {
+    "shoulder_pan": 2000,
+    "shoulder_lift": 1903,
+    "elbow_flex": 1126,
+    "wrist_flex": 1988,
+    "wrist_roll": 387,
+    "gripper": 1993
+  }
+}
