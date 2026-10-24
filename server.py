@@ -41,6 +41,9 @@ POSITION_TOLERANCE = 15
 POSE_STEP_SECONDS = 0.06
 POSE_MAX_LEAD = 80
 POSE_TOLERANCE = 35
+HOME_TOLERANCE = 15
+HOME_TRIM_OFFSET = 40
+HOME_TRIM_PERIOD = 0.15
 POSE_TIMEOUT_SECONDS = 40
 POSE_STALL_SECONDS = 2.0
 POSE_STALL_TICKS = 3
@@ -370,6 +373,7 @@ class Arm:
                 "progress_position": {name: snapshot[name]["position"] for name in JOINT_NAMES},
                 "progress_time": {name: now for name in JOINT_NAMES},
                 "high_load": {name: 0 for name in JOINT_NAMES},
+                "trim_pending": set(),
                 "writes": 0, "progress": 0.0,
                 "next": now, "last_update": now, "expires": now + POSE_TIMEOUT_SECONDS,
             }
@@ -394,7 +398,8 @@ class Arm:
         started = sum(abs(targets[index] - hold["start_positions"][name])
                       for index, name in enumerate(JOINT_NAMES))
         hold["progress"] = 0.0 if not started else max(0.0, min(1.0, 1.0 - remaining / started))
-        if all(abs(errors[name]) <= POSE_TOLERANCE for name in JOINT_NAMES):
+        tolerance = HOME_TOLERANCE if hold["pose"] == "home" else POSE_TOLERANCE
+        if all(abs(errors[name]) <= tolerance for name in JOINT_NAMES):
             # The previous bounded goal is already near this endpoint. Keep
             # the exact pose as the holding goal so completion does not snap
             # the target backward to a still-moving encoder reading.
@@ -402,6 +407,7 @@ class Arm:
             self.hold = None
             return
         goals = {}
+        trimming = False
         for index, name in enumerate(JOINT_NAMES):
             load = abs(snapshot[name]["load"])
             hold["high_load"][name] = hold["high_load"][name] + 1 if load >= MAX_LOAD else 0
@@ -411,10 +417,20 @@ class Arm:
             if abs(position - hold["progress_position"][name]) >= POSE_STALL_TICKS:
                 hold["progress_position"][name] = position
                 hold["progress_time"][name] = now
-            elif abs(errors[name]) > POSE_TOLERANCE and now - hold["progress_time"][name] >= POSE_STALL_SECONDS:
+            elif abs(errors[name]) > tolerance and now - hold["progress_time"][name] >= POSE_STALL_SECONDS:
                 raise RuntimeError(f"Motor {index + 1} stalled at {position}")
             direction = 1 if errors[name] > 0 else -1
-            goal = position + direction * min(abs(errors[name]), POSE_MAX_LEAD)
+            if hold["pose"] == "home" and tolerance < abs(errors[name]) <= HOME_TRIM_OFFSET:
+                trimming = True
+                if name in hold["trim_pending"]:
+                    goal = targets[index]
+                    hold["trim_pending"].remove(name)
+                else:
+                    goal = targets[index] + direction * HOME_TRIM_OFFSET
+                    hold["trim_pending"].add(name)
+            else:
+                hold["trim_pending"].discard(name)
+                goal = position + direction * min(abs(errors[name]), POSE_MAX_LEAD)
             goal = max(envelope.lower[index], min(envelope.upper[index], goal))
             goal = max(self.firmware_min[name], min(self.firmware_max[name], goal))
             if (direction > 0 and goal < position) or (direction < 0 and goal > position):
@@ -423,7 +439,7 @@ class Arm:
         self.bus.sync_write("Goal_Position", goals, normalize=False)
         hold["writes"] += 1
         hold["last_update"] = now
-        hold["next"] = now + POSE_STEP_SECONDS
+        hold["next"] = now + (HOME_TRIM_PERIOD if trimming else POSE_STEP_SECONDS)
 
     def _new_hold(self, motor, mode, position, *, direction=0, target=None):
         now = time.monotonic()

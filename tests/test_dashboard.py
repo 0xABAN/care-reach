@@ -12,7 +12,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from motion_core import JOINT_NAMES
-from server import Arm, POSE_TOLERANCE, STOP_SETTLE_LEAD, handler_for
+from server import Arm, HOME_TOLERANCE, POSE_TOLERANCE, STOP_SETTLE_LEAD, handler_for
 
 
 class FakeBus:
@@ -312,13 +312,24 @@ class PoseTests(DashboardBase):
         done, steps = self.run_pose(arm)
         self.assertTrue(done, f"pose move did not finish in {steps} steps")
         for index, name in enumerate(JOINT_NAMES):
-            self.assertLessEqual(abs(bus.positions[name] - 2000), POSE_TOLERANCE, name)
+            self.assertLessEqual(abs(bus.positions[name] - 2000), HOME_TOLERANCE, name)
             self.assertEqual(bus.goals[name], 2000)
         self.assertLessEqual(max(bus.leads), 80)
         self.assertGreater(len(bus.leads), 20)
         self.assertEqual(bus.disconnects, [])
         self.assertTrue(all(value == 1 for value in bus.torque.values()))
         self.assertFalse(arm.state()["pose"]["active"])
+
+    def test_home_trims_a_joint_stuck_inside_the_old_completion_window(self):
+        bus = TrackingBus((2000, 2000, 2026, 2000, 2000, 2000))
+        arm = self.arm(bus)
+        arm.pose_start("home")
+        done, _ = self.run_pose(arm)
+        self.assertTrue(done)
+        self.assertLessEqual(abs(bus.positions["elbow_flex"] - 2000), HOME_TOLERANCE)
+        self.assertTrue(any(write[0] == "Goal_Position" and len(write) == 2
+                            and write[1]["elbow_flex"] == 1960 for write in bus.writes))
+        self.assertEqual(bus.goals["elbow_flex"], 2000)
 
     def test_fold_from_home_reaches_recorded_fold(self):
         bus = TrackingBus((2000,) * 6)
