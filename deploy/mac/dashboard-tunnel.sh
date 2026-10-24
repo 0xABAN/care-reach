@@ -3,10 +3,10 @@ set -euo pipefail
 
 local_port=8765
 socket="$HOME/.ssh/care-reach-dashboard-tunnel.sock"
-target=robot@pi.local
+target=robot@care-reach-robot-pi
 
 if [[ ${1:-} == stop ]]; then
-  ssh -S "$socket" -O exit "$target"
+  ssh -o StrictHostKeyChecking=accept-new -S "$socket" -O exit "$target"
   exit
 fi
 if (( $# != 0 )); then
@@ -14,7 +14,7 @@ if (( $# != 0 )); then
   exit 2
 fi
 
-if ssh -S "$socket" -O check "$target" >/dev/null 2>&1; then
+if ssh -o StrictHostKeyChecking=accept-new -S "$socket" -O check "$target" >/dev/null 2>&1; then
   echo "Dashboard tunnel is already running: http://127.0.0.1:$local_port"
   exit
 fi
@@ -27,6 +27,6 @@ if lsof -nP -iTCP:"$local_port" -sTCP:LISTEN >/dev/null 2>&1; then
   exit 1
 fi
 
-ssh -fN -M -S "$socket" -o ExitOnForwardFailure=yes -o ServerAliveInterval=10 \
+ssh -fN -M -S "$socket" -o StrictHostKeyChecking=accept-new -o ExitOnForwardFailure=yes -o ServerAliveInterval=10 \
   -L "127.0.0.1:$local_port:127.0.0.1:8765" "$target"
 echo "Dashboard tunnel started: http://127.0.0.1:$local_port"

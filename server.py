@@ -31,6 +31,7 @@ BASE_TICKS_PER_SECOND = 25
 MAX_COMMAND_SPEED = (180, 180, 180, 180, 200, 180)
 MAX_COMMAND_ACCELERATION = (300, 300, 300, 300, 360, 300)
 MAX_TARGET_LEAD = 80
+STOP_SETTLE_LEAD = 40  # Measured wrist coast was about 37 ticks at 8x speed.
 RECOVERY_MARGIN = 40  # Allow a small encoder drift past the saved fold, inward only.
 STEP_SECONDS = 0.04
 LEASE_SECONDS = 0.75
@@ -184,10 +185,42 @@ class Arm:
         position = self._read("Present_Position")[name]
         self._write_goal(motor, position)
 
-    def _stop(self):
+    def _settle_goal(self, hold, name, position):
+        """Coast at most STOP_SETTLE_LEAD ticks in the jog direction, never past
+        the last commanded goal or outside the safe span and firmware range;
+        if measured already overshot the last goal, hold measured."""
+        index = hold["motor"] - 1
+        last_goal = hold["last_goal"]
+        if hold["direction"] > 0:
+            if position >= last_goal:
+                return position
+            target = min(position + STOP_SETTLE_LEAD, last_goal)
+        else:
+            if position <= last_goal:
+                return position
+            target = max(position - STOP_SETTLE_LEAD, last_goal)
+        try:
+            low, high, _, _ = self._safe_span(index, position)
+        except ValueError:
+            return position
+        target = min(high, max(low, target))
+        target = min(self.firmware_max[name], max(self.firmware_min[name], target))
+        if (hold["direction"] > 0 and target < position) or (hold["direction"] < 0 and target > position):
+            return position
+        return target
+
+    def _stop(self, *, settle=False):
         previous = self.hold
         self.hold = None
-        if previous:
+        if not previous:
+            return
+        if settle and previous["mode"] == "jog":
+            name = JOINT_NAMES[previous["motor"] - 1]
+            if self._read("Torque_Enable")[name] != 1:
+                return
+            position = self._read("Present_Position")[name]
+            self._write_goal(previous["motor"], self._settle_goal(previous, name, position))
+        else:
             self._hold_measured(previous["motor"])
 
     def state(self):
@@ -291,7 +324,7 @@ class Arm:
     def stop(self, token=None):
         with self.lock:
             if self.hold and (token is None or token == self.hold["token"]):
-                self._stop()
+                self._stop(settle=True)
 
     def _advance(self, now):
         hold = self.hold
@@ -315,7 +348,7 @@ class Arm:
         hold["last_update"] = now
         if hold["mode"] == "jog":
             if not (forward if hold["direction"] > 0 else backward):
-                self._stop()
+                self._stop(settle=True)
                 return
             hold["target"] += hold["direction"] * BASE_TICKS_PER_SECOND * self.settings[str(index + 1)]["scale"] * dt
             desired = hold["target"]
@@ -443,6 +476,9 @@ def motor_id(value):
     return value
 
 
+ACCEPTED_HOSTNAMES = ("localhost", "127.0.0.1", "pi", "pi.local")
+
+
 def handler_for(arm, port):
     class Handler(BaseHTTPRequestHandler):
         def reply(self, code, data):
@@ -454,14 +490,30 @@ def handler_for(arm, port):
             self.end_headers()
             self.wfile.write(body)
 
+        def _accepted_host(self, raw):
+            try:
+                parts = urlsplit("//" + raw)
+                hostname, host_port = parts.hostname, parts.port
+            except ValueError:
+                return False
+            if hostname is None or host_port != port:
+                return False
+            hostname = hostname.lower()
+            if hostname in ACCEPTED_HOSTNAMES:
+                return True
+            return hostname == self.connection.getsockname()[0].lower()
+
         def allowed(self):
-            if self.headers.get("Host") not in (f"127.0.0.1:{port}", f"localhost:{port}"):
+            host = self.headers.get("Host")
+            if not host or not self._accepted_host(host):
                 self.reply(403, {"error": "Invalid host"})
                 return False
             origin = self.headers.get("Origin")
-            if origin and origin not in (f"http://127.0.0.1:{port}", f"http://localhost:{port}"):
-                self.reply(403, {"error": "Invalid origin"})
-                return False
+            if origin:
+                parts = urlsplit(origin)
+                if parts.scheme != "http" or parts.netloc != host:
+                    self.reply(403, {"error": "Invalid origin"})
+                    return False
             return True
 
         def do_GET(self):
@@ -560,12 +612,14 @@ def handler_for(arm, port):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", help="URT-2 serial port; detected automatically by default")
+    parser.add_argument("--http-host", default="127.0.0.1",
+                        help="HTTP bind address; use 0.0.0.0 on the Pi for LAN access")
     parser.add_argument("--http-port", type=int, default=8765)
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     arm = Arm(args.port or find_port())
     try:
-        server = ThreadingHTTPServer(("127.0.0.1", args.http_port), handler_for(arm, args.http_port))
+        server = ThreadingHTTPServer((args.http_host, args.http_port), handler_for(arm, args.http_port))
     except Exception:
         arm.close()
         raise
@@ -576,7 +630,11 @@ def main():
 
     signal.signal(signal.SIGINT, shutdown)
     signal.signal(signal.SIGTERM, shutdown)
-    print(f"SO-101 control panel: http://127.0.0.1:{args.http_port}", flush=True)
+    if args.http_host == "0.0.0.0":
+        target = f"http://pi.local:{args.http_port} (or the Pi's LAN IPv4 address)"
+    else:
+        target = f"http://{args.http_host}:{args.http_port}"
+    print(f"SO-101 control panel: {target}", flush=True)
     try:
         server.serve_forever(poll_interval=0.2)
     finally:
