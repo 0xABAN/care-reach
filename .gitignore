@@ -1,0 +1,5 @@
+joint_settings.json.tmp
+__pycache__/
+.venv/
+.pytest_cache/
+.DS_Store

@@ -1,0 +1,32 @@
+{
+  "1": {
+    "lower": 1116,
+    "upper": 2597,
+    "scale": 8
+  },
+  "2": {
+    "lower": 903,
+    "upper": 3223,
+    "scale": 1
+  },
+  "3": {
+    "lower": 881,
+    "upper": 2987,
+    "scale": 1
+  },
+  "4": {
+    "lower": 863,
+    "upper": 3110,
+    "scale": 8
+  },
+  "5": {
+    "lower": null,
+    "upper": null,
+    "scale": 8
+  },
+  "6": {
+    "lower": 1317,
+    "upper": 2742,
+    "scale": 8
+  }
+}
