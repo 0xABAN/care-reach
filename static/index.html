@@ -26,6 +26,9 @@
     .hold-all { background: #235960; border-color: #559aa0; font-weight: 700; white-space: nowrap; }
     .release { background: #6e2c31; border-color: #ad555a; font-weight: 700; white-space: nowrap; }
     .release:hover { background: #88373d; }
+    .transcription { background: #263841; border-color: #6f93c0; font-weight: 700; white-space: nowrap; }
+    .transcription[aria-checked="true"] { background: #197f86; border-color: #7ed7dc; }
+    .voice-status { margin: -8px 0 16px; font-size: .9rem; }
     .grid { display: grid; gap: 12px; }
     .joint { background: #1c2a32; border: 1px solid #33454f; border-radius: 14px; padding: 17px; display: grid; grid-template-columns: minmax(155px,1.2fr) minmax(215px,1.5fr) minmax(180px,1fr) minmax(245px,1.5fr); gap: 16px; align-items: center; }
     .joint.moving { border-color: #7ed7dc; box-shadow: inset 0 0 0 1px #7ed7dc; }
@@ -64,13 +67,14 @@
     </nav>
     <section id="controls-panel" role="tabpanel" aria-labelledby="tab-controls">
     <div class="top">
-      <div><h1>SO-101 Joint Control</h1><p class="subtitle muted">Hold a direction to move any joint. Release to hold its measured position.</p><p class="subtitle muted" id="folded-pose"></p></div>
-      <div class="top-actions"><button class="pose" id="pose-home">Home</button><button class="pose" id="pose-fold">Fold</button><button class="pose" id="pose-dance">Dance</button><button class="hold-all" id="hold-all">Hold all joints</button><button class="release" id="release" disabled title="Set and verify the coiled rest pose first">Torque release unavailable</button></div>
+      <div><h1>SO-101 Joint Control</h1><p class="subtitle muted">Hold a direction to move any joint. Release to hold its measured position.</p><p class="subtitle muted" id="extended-pose"></p></div>
+      <div class="top-actions"><button class="transcription" id="transcription-toggle" role="switch" aria-checked="false" disabled>Transcription: checking…</button><button class="pose" id="pose-home">Home / Retract</button><button class="pose" id="pose-extend">Extend</button><button class="pose" id="pose-dance">Dance</button><button class="hold-all" id="hold-all">Hold all joints</button><button class="release" id="release" disabled title="Torque release is unavailable">Torque release unavailable</button></div>
     </div>
+    <p id="voice-status" class="voice-status muted" role="status">Checking voice service…</p>
     <div id="status" class="status">Connecting to the arm…</div>
     <details class="history"><summary>Recent power and servo events</summary><ul id="fault-history"><li>Loading…</li></ul></details>
     <div id="joints" class="grid"></div>
-    <p class="hint muted">Forward increases encoder ticks. Saved joint limits are shown read-only; hold speed is 1×, 2×, 4×, or 8×. Closing the gripper keeps a bounded inward hold when released. Home, Fold, and Dance move all six joints; Dance homes first and returns Home. Press the active button again to cancel. Torque remains on when a hold ends or this panel closes.</p>
+    <p class="hint muted">Forward increases encoder ticks. Saved joint limits are shown read-only; hold speed is 1×, 2×, 4×, or 8×. Closing the gripper keeps a bounded inward hold when released. Home is the retracted pose; Extend is the camera-safe upright pose. Dance homes first and returns Home. Press an active pose button again to cancel. Torque remains on when a hold ends or this panel closes.</p>
     </section>
     <section id="camera-panel" role="tabpanel" aria-labelledby="tab-camera" hidden>
       <h1>Live camera</h1>
@@ -100,6 +104,45 @@
     let press = null;
     let rowsBuilt = false;
     let lastState = null;
+    const transcriptionToggle = document.getElementById('transcription-toggle');
+    const voiceStatus = document.getElementById('voice-status');
+    let transcriptionEnabled = null;
+    let transcriptionBusy = false;
+
+    function renderTranscription(enabled, detail = '') {
+      transcriptionEnabled = enabled;
+      transcriptionToggle.disabled = transcriptionBusy || enabled === null;
+      transcriptionToggle.setAttribute('aria-checked', String(enabled === true));
+      transcriptionToggle.textContent = enabled === null ? 'Transcription: unavailable' :
+        `Transcription: ${enabled ? 'On' : 'Off'}`;
+      voiceStatus.textContent = detail || (enabled ? 'Cartesia transcription is on.' :
+        'Cartesia transcription is off; no microphone audio is sent.');
+    }
+
+    async function refreshTranscription() {
+      if (transcriptionBusy) return;
+      try {
+        const response = await fetch('/api/transcription', {cache: 'no-store'});
+        const state = await response.json();
+        if (!response.ok) throw new Error(state.error || 'Could not reach voice service');
+        renderTranscription(state.enabled);
+      } catch (error) { renderTranscription(null, error.message); }
+    }
+
+    transcriptionToggle.addEventListener('click', async () => {
+      if (transcriptionBusy || transcriptionEnabled === null) return;
+      transcriptionBusy = true;
+      transcriptionToggle.disabled = true;
+      voiceStatus.textContent = 'Updating transcription…';
+      try {
+        const state = await api('/api/transcription', {enabled: !transcriptionEnabled});
+        transcriptionBusy = false;
+        renderTranscription(state.enabled);
+      } catch (error) {
+        transcriptionBusy = false;
+        renderTranscription(null, error.message);
+      }
+    });
 
     async function api(path, data) {
       const response = await fetch(path, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(data), cache: 'no-store', keepalive: path === '/api/hold/stop'});
@@ -226,16 +269,16 @@
           }
         }
         const faulted = state.motors.filter(m => m.fault).map(m => m.id);
-        if (state.folded_ticks) document.getElementById('folded-pose').textContent =
-          `Saved folded ticks 1–6: ${Object.values(state.folded_ticks).join(' · ')}`;
+        if (state.extended_ticks) document.getElementById('extended-pose').textContent =
+          `Saved upright ticks 1–6: ${Object.values(state.extended_ticks).join(' · ')}`;
         const homeBtn = document.getElementById('pose-home');
-        const foldBtn = document.getElementById('pose-fold');
+        const extendBtn = document.getElementById('pose-extend');
         const danceBtn = document.getElementById('pose-dance');
         homeBtn.disabled = !state.pose_enabled || (poseActive && pose.name !== 'home');
-        foldBtn.disabled = !state.pose_enabled || (poseActive && pose.name !== 'fold');
+        extendBtn.disabled = !state.pose_enabled || (poseActive && pose.name !== 'extend');
         danceBtn.disabled = !state.pose_enabled || (poseActive && pose.name !== 'dance');
         homeBtn.classList.toggle('active', poseActive && pose.name === 'home');
-        foldBtn.classList.toggle('active', poseActive && pose.name === 'fold');
+        extendBtn.classList.toggle('active', poseActive && pose.name === 'extend');
         danceBtn.classList.toggle('active', poseActive && pose.name === 'dance');
         document.getElementById('hold-all').disabled = !state.hold_all_enabled || poseActive;
         if (state.error) show(state.error, true);
@@ -256,7 +299,7 @@
       } catch (error) { show(error.message, true); }
     }
     document.getElementById('pose-home').addEventListener('click', () => togglePose('home'));
-    document.getElementById('pose-fold').addEventListener('click', () => togglePose('fold'));
+    document.getElementById('pose-extend').addEventListener('click', () => togglePose('extend'));
     document.getElementById('pose-dance').addEventListener('click', () => togglePose('dance'));
     document.getElementById('release').addEventListener('click', async () => {
       endPress();
@@ -274,6 +317,7 @@
     document.addEventListener('visibilitychange', () => { if (document.hidden) endPress(); });
     window.addEventListener('pagehide', endPress);
     refresh(); setInterval(refresh, 1000);
+    refreshTranscription(); setInterval(refreshTranscription, 2000);
   </script>
 </body>
 </html>

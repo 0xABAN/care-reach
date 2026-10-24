@@ -1,0 +1,1 @@
+cartesia[websockets]>=4.2,<5

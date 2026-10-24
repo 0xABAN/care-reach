@@ -1,9 +1,9 @@
-"""Plan a coordinated move to this arm's manually recorded folded pose.
+"""Inspect the historical folded pose offline; live execution is disabled.
 
 The endpoint is stored as raw encoder ticks in folded_pose.json. Lance
 established it by hand with torque disabled; encoder readings were confirmed
-twice. An automated home-to-folded move reached within eight ticks of this
-pose. This command never releases torque.
+twice. A wrist-mounted camera now blocks this pose, so --execute refuses to
+open the servo bus. Keep the record only for provenance and recovery math.
 """
 
 from __future__ import annotations
@@ -94,7 +94,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true", help="plan only (default)")
-    mode.add_argument("--execute", action="store_true", help="move the connected arm")
+    mode.add_argument("--execute", action="store_true", help="disabled: wrist camera blocks the folded pose")
     parser.add_argument("--fps", type=int, default=20)
     parser.add_argument("--port", default="/dev/cu.usbmodem5B790785631")
     parser.add_argument("--settings", type=Path, default=Path(__file__).with_name("joint_settings.json"))
@@ -102,6 +102,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--pose", type=Path, default=POSE_PATH, help="recorded folded pose JSON")
     parser.add_argument("--csv", type=Path, help="save planned target ticks")
     args = parser.parse_args(argv)
+
+    if args.execute:
+        parser.error("Fold execution is disabled: the wrist camera blocks this pose; use Home instead")
 
     try:
         bounds = SafetyBounds.from_files(args.settings, args.calibration)
@@ -114,16 +117,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.csv:
         write_plan_csv(args.csv, frames, args.fps)
         print(f"planned targets: {args.csv}")
-    if not args.execute:
-        print("dry run complete; no servo bus opened")
-        return 0
-
-    from measured_pose_runner import MeasuredPoseRunner
-
-    result = MeasuredPoseRunner(args.port, task_bounds).move(
-        target, max_lead=80, period_s=0.06, timeout_s=35, tolerance=35
-    )
-    print(f"fold completed in {result['elapsed_s']:.1f}s; measured {result['positions']}; torque remains enabled")
+    print("dry run complete; no servo bus opened")
     return 0
 
 

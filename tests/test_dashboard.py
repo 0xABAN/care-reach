@@ -384,6 +384,7 @@ class DashboardTests(DashboardBase):
 class PoseTests(DashboardBase):
     FOLD = (2040, 893, 3064, 2888, 2416, 1470)
     HOME = home_target()
+    EXTEND = (2000, 1903, 1126, 1988, 387, 1993)
 
     def run_pose(self, arm, seconds=120.0):
         start = time.monotonic()
@@ -423,16 +424,24 @@ class PoseTests(DashboardBase):
                              and write[1]["elbow_flex"] > 3065 for write in bus.writes))
         self.assertEqual(bus.goals["elbow_flex"], 3065)
 
-    def test_fold_from_home_reaches_recorded_fold(self):
-        bus = TrackingBus((2000,) * 6)
+    def test_extend_from_home_reaches_confirmed_upright_target(self):
+        bus = TrackingBus(self.HOME)
         arm = self.arm(bus)
-        arm.pose_start("fold")
+        arm.pose_start("extend")
         done, steps = self.run_pose(arm)
         self.assertTrue(done, f"pose move did not finish in {steps} steps")
         for index, name in enumerate(JOINT_NAMES):
-            self.assertLessEqual(abs(bus.positions[name] - self.FOLD[index]), POSE_TOLERANCE, name)
-            self.assertEqual(bus.goals[name], self.FOLD[index])
-        self.assertLessEqual(max(bus.leads), 80)
+            self.assertLessEqual(abs(bus.positions[name] - self.EXTEND[index]), POSE_TOLERANCE, name)
+            self.assertEqual(bus.goals[name], self.EXTEND[index])
+        self.assertLessEqual(max(bus.leads), 55)
+        for register, goals in bus.writes:
+            if register != "Goal_Position":
+                continue
+            shoulder_fraction = ((goals["shoulder_lift"] - self.HOME[1])
+                                 / (self.EXTEND[1] - self.HOME[1]))
+            elbow_fraction = ((goals["elbow_flex"] - self.HOME[2])
+                              / (self.EXTEND[2] - self.HOME[2]))
+            self.assertLess(abs(shoulder_fraction - elbow_fraction), .05)
         self.assertEqual(bus.disconnects, [])
         self.assertTrue(all(value == 1 for value in bus.torque.values()))
 
@@ -467,22 +476,23 @@ class PoseTests(DashboardBase):
         self.assertEqual(bus.goals, bus.positions)
         self.assertTrue(all(value == 1 for value in bus.torque.values()))
 
-    def test_fold_then_home_round_trip_from_fold_start(self):
-        bus = TrackingBus(self.FOLD)
+    def test_extend_then_home_round_trip(self):
+        bus = TrackingBus(self.HOME)
         arm = self.arm(bus)
-        arm.pose_start("home")
+        arm.pose_start("extend")
         self.assertTrue(self.run_pose(arm)[0])
-        arm.pose_start("fold")
+        arm.pose_start("home")
         done, steps = self.run_pose(arm)
         self.assertTrue(done, f"pose move did not finish in {steps} steps")
         for index, name in enumerate(JOINT_NAMES):
-            self.assertLessEqual(abs(bus.positions[name] - self.FOLD[index]), POSE_TOLERANCE, name)
+            self.assertLessEqual(abs(bus.positions[name] - self.HOME[index]), POSE_TOLERANCE, name)
+        self.assertLessEqual(max(bus.leads), 55)
         self.assertTrue(all(value == 1 for value in bus.torque.values()))
 
     def test_concurrent_requests_rejected_while_pose_active(self):
         bus = TrackingBus((2000,) * 6)
         arm = self.arm(bus)
-        arm.pose_start("fold")
+        arm.pose_start("extend")
         with self.assertRaisesRegex(ValueError, "already active"):
             arm.pose_start("home")
         with self.assertRaisesRegex(ValueError, "pose move"):
@@ -500,7 +510,7 @@ class PoseTests(DashboardBase):
     def test_cancel_holds_measured_pose_and_preserves_torque(self):
         bus = TrackingBus((2000,) * 6)
         arm = self.arm(bus)
-        arm.pose_start("fold")
+        arm.pose_start("extend")
         start = time.monotonic()
         for index in range(1, 6):
             arm._advance(start + index * 0.06)
@@ -521,7 +531,7 @@ class PoseTests(DashboardBase):
 
         bus = FaultBus((2000,) * 6)
         arm = self.arm(bus)
-        arm.pose_start("fold")
+        arm.pose_start("extend")
         start = time.monotonic()
         with self.assertRaisesRegex(RuntimeError, "fault 32"):
             for index in range(1, 20):
@@ -540,7 +550,7 @@ class PoseTests(DashboardBase):
 
         bus = FrozenBus((2000,) * 6)
         arm = self.arm(bus)
-        arm.pose_start("fold")
+        arm.pose_start("extend")
         start = time.monotonic()
         with self.assertRaisesRegex(RuntimeError, "stalled"):
             for index in range(1, 100):
@@ -554,7 +564,7 @@ class PoseTests(DashboardBase):
     def test_timeout_stops_and_holds_measured_pose(self):
         bus = TrackingBus((2000,) * 6)
         arm = self.arm(bus)
-        arm.pose_start("fold")
+        arm.pose_start("extend")
         arm.hold["expires"] = time.monotonic() - 1
         arm._advance(time.monotonic())
         self.assertIsNone(arm.hold)
@@ -566,7 +576,7 @@ class PoseTests(DashboardBase):
     def test_close_during_pose_holds_measured_and_never_releases_torque(self):
         bus = TrackingBus((2000,) * 6)
         arm = self.arm(bus)
-        arm.pose_start("fold")
+        arm.pose_start("extend")
         start = time.monotonic()
         for index in range(1, 6):
             arm._advance(start + index * 0.06)
@@ -589,6 +599,35 @@ class PoseTests(DashboardBase):
         with self.assertRaisesRegex(RuntimeError, "Motor 6 voltage alarm"):
             arm.pose_start("dance")
         self.assertIsNone(arm.hold)
+        self.assertTrue(all(value == 1 for value in bus.torque.values()))
+
+    def test_fold_pose_is_rejected_with_wrist_camera(self):
+        bus = TrackingBus(self.HOME)
+        arm = self.arm(bus)
+        with self.assertRaisesRegex(ValueError, "folded pose is unavailable"):
+            arm.pose_start("fold")
+        self.assertIsNone(arm.hold)
+        self.assertEqual(bus.writes, [])
+
+    def test_dance_from_extend_uses_coordinated_home_leg(self):
+        bus = TrackingBus(self.EXTEND)
+        arm = self.arm(bus)
+        arm.pose_start("dance")
+        self.assertIsNotNone(arm.hold["trajectory"])
+        start = time.monotonic()
+        for index in range(1, 60):
+            arm._advance(start + index * .06)
+        self.assertLessEqual(max(bus.leads), 55)
+        self.assertTrue(all(value == 1 for value in bus.torque.values()))
+        arm.pose_stop()
+
+    def test_full_dance_from_extend_returns_home(self):
+        bus = TrackingBus(self.EXTEND)
+        arm = self.arm(bus)
+        arm.pose_start("dance")
+        done, steps = self.run_pose(arm, seconds=200)
+        self.assertTrue(done, f"dance from upright did not finish in {steps} steps")
+        self.assertEqual(bus.goals, dict(zip(JOINT_NAMES, self.HOME, strict=True)))
         self.assertTrue(all(value == 1 for value in bus.torque.values()))
 
     def test_home_target_outside_envelope_is_rejected(self):
@@ -668,6 +707,61 @@ class HttpHostTests(unittest.TestCase):
         header_blob, _, payload = raw.partition(b"\r\n\r\n")
         status = int(header_blob.split(b" ", 2)[1])
         return status, json.loads(payload) if parse_json else (header_blob, payload)
+
+    @staticmethod
+    def call_post(handler_class, path, data, headers=None):
+        body = json.dumps(data).encode()
+        handler = handler_class.__new__(handler_class)
+        handler.path = path
+        handler.headers = {"Host": "pi.local:8765", "Content-Type": "application/json",
+                           "Content-Length": str(len(body)), **(headers or {})}
+        handler.client_address = ("192.168.1.23", 43210)
+        handler.connection = type("FakeConnection", (), {"getsockname": lambda self: ("192.168.1.42", 8765)})()
+        handler.rfile = io.BytesIO(body)
+        handler.wfile = io.BytesIO()
+        handler._headers_buffer = []
+        handler.requestline = f"POST {path} HTTP/1.1"
+        handler.request_version = "HTTP/1.1"
+        handler.server_version = "Fake/1.0"
+        handler.sys_version = "Python/3"
+        handler.protocol_version = "HTTP/1.1"
+        handler.do_POST()
+        header_blob, _, payload = handler.wfile.getvalue().partition(b"\r\n\r\n")
+        return int(header_blob.split(b" ", 2)[1]), json.loads(payload)
+
+    def test_transcription_switch_proxies_only_voice_state(self):
+        page = (Path(__file__).resolve().parents[1] / "static" / "index.html").read_text()
+        self.assertIn('id="transcription-toggle"', page)
+        self.assertIn("'/api/transcription'", page)
+
+        with patch("server.urlopen", return_value=io.BytesIO(
+                b'{"listening":true,"stt_mode":"stream","raw":"private speech"}')) as request:
+            status, state = self.call(self.handler, {"Host": "pi.local:8765"},
+                                      path="/api/transcription")
+        self.assertEqual((status, state), (200, {"enabled": True, "stt_mode": "stream"}))
+        request.assert_called_once_with("http://127.0.0.1:8770/state", timeout=3)
+
+        for enabled in (False, True):
+            with patch("server.urlopen", return_value=io.BytesIO(b"OK")) as request:
+                status, state = self.call_post(self.handler, "/api/transcription", {"enabled": enabled})
+            self.assertEqual((status, state), (200, {"enabled": enabled}))
+            outbound = request.call_args.args[0]
+            self.assertEqual(outbound.full_url, "http://127.0.0.1:8770/listen")
+            self.assertEqual(json.loads(outbound.data), {"enabled": enabled})
+
+        with patch("server.urlopen") as request:
+            status, state = self.call_post(self.handler, "/api/transcription", {"enabled": 1})
+        self.assertEqual((status, state), (400, {"error": "enabled must be boolean"}))
+        request.assert_not_called()
+
+    def test_transcription_service_unavailable_is_separate_from_arm_state(self):
+        with patch("server.urlopen", side_effect=OSError("voice offline")):
+            status, state = self.call(self.handler, {"Host": "pi.local:8765"},
+                                      path="/api/transcription")
+        self.assertEqual((status, state), (503, {"error": "Transcription service unavailable"}))
+        status, state = self.call(self.handler, {"Host": "pi.local:8765"}, path="/api/state")
+        self.assertEqual(status, 200)
+        self.assertIn("motors", state)
 
     def test_camera_tab_and_same_origin_stream(self):
         page = (Path(__file__).resolve().parents[1] / "static" / "index.html").read_text()
@@ -781,6 +875,17 @@ class HttpHostTests(unittest.TestCase):
         status, payload = self.post(self.handler, "/api/pose/start", {"pose": "coiled"})
         self.assertEqual(status, 400)
         self.assertIn("pose must be", payload["error"])
+        status, payload = self.post(self.handler, "/api/pose/start", {"pose": "fold"})
+        self.assertEqual(status, 400)
+        self.assertIn("folded pose is unavailable", payload["error"])
+
+    def test_extend_endpoint_uses_saved_upright_target(self):
+        status, payload = self.post(self.handler, "/api/pose/start", {"pose": "extend"})
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["pose"], "extend")
+        _, state = self.call(self.handler, {"Host": "127.0.0.1:8765"}, client_ip="127.0.0.1")
+        self.assertEqual(state["pose"]["target"],
+                         dict(zip(JOINT_NAMES, (2000, 1903, 1126, 1988, 387, 1993), strict=True)))
 
     def test_dance_endpoint_starts_and_cancels(self):
         status, payload = self.post(self.handler, "/api/pose/start", {"pose": "dance"})
@@ -806,13 +911,14 @@ class StaticUiTests(unittest.TestCase):
     def setUp(self):
         self.page = self.PAGE.read_text(encoding="utf-8")
 
-    def test_home_and_fold_buttons_replace_limit_editing(self):
+    def test_home_extend_and_dance_buttons_replace_fold(self):
         self.assertIn('id="pose-home"', self.page)
-        self.assertIn('id="pose-fold"', self.page)
+        self.assertIn('id="pose-extend"', self.page)
         self.assertIn('id="pose-dance"', self.page)
-        self.assertIn(">Home</button>", self.page)
-        self.assertIn(">Fold</button>", self.page)
+        self.assertIn(">Home / Retract</button>", self.page)
+        self.assertIn(">Extend</button>", self.page)
         self.assertIn(">Dance</button>", self.page)
+        self.assertNotIn('id="pose-fold"', self.page)
         self.assertIn("/api/pose/start", self.page)
         self.assertIn("/api/pose/stop", self.page)
         self.assertIn("limit-range", self.page)

@@ -16,14 +16,15 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import URLError
 from urllib.parse import urlsplit
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 from serial.tools import list_ports
 from lerobot.motors import Motor, MotorNormMode, SerialMotorsBus
 
 from measured_pose_runner import GRIP_HOLD_LEAD
-from motion_core import JOINT_NAMES, SafetyBounds, validate_pose
+from motion_core import JOINT_NAMES, SafetyBounds, quintic_segment, validate_pose
 from dance_demo import HOME as DANCE_CENTER, build_plan as build_dance_plan
+from extended_pose import extended_target
 from home_pose import home_bounds, home_target
 from park import folded_bounds, folded_target
 from telemetry import DEFAULT_PATH, TelemetryLog
@@ -57,6 +58,10 @@ POSE_MEASURED_OVERSHOOT = 5
 DANCE_FPS = 20
 DANCE_SCALE = 1.0
 DANCE_STALL_SECONDS = 2.0
+EXTEND_FPS = 20
+EXTEND_MAX_LEAD = 55
+EXTEND_VMAX = (180, 90, 200, 90, 100, 100)
+EXTEND_AMAX = (300, 180, 260, 180, 200, 200)
 
 
 def find_port():
@@ -100,6 +105,7 @@ class Arm:
         self.settings = load_settings(self.settings_path)
         self.folded = folded_target(pose_path) if pose_path is not None else folded_target()
         self.home = home_target()
+        self.extended = extended_target()
         self.bounds = SafetyBounds.from_files(self.settings_path, self.calibration_path)
         self.park_bounds = folded_bounds(home_bounds(self.bounds, self.home), self.folded)
         self.hold = None
@@ -391,7 +397,7 @@ class Arm:
                 "recent_events": list(self.telemetry.recent)[-8:],
                 "pose_enabled": all(m["motion_enabled"] for m in motors),
                 "hold_all_enabled": not all(m["torque"] for m in motors) and not any(m["fault"] for m in motors),
-                "folded_ticks": dict(zip(JOINT_NAMES, self.folded, strict=True)),
+                "extended_ticks": dict(zip(JOINT_NAMES, self.extended, strict=True)),
                 "pose": {
                     "active": pose is not None,
                     "name": pose["pose"] if pose else None,
@@ -461,8 +467,8 @@ class Arm:
         with self.lock:
             if self.hold is not None:
                 raise ValueError("A movement is already active; cancel it before starting a pose move")
-            if pose not in ("home", "fold", "dance"):
-                raise ValueError("pose must be 'home', 'fold', or 'dance'")
+            if pose not in ("home", "extend", "dance"):
+                raise ValueError("pose must be 'home', 'extend', or 'dance'; folded pose is unavailable with the wrist camera")
             dance_frames = None
             if pose == "dance":
                 _, dance_frames = build_dance_plan(self.bounds, DANCE_SCALE, DANCE_FPS)
@@ -471,7 +477,7 @@ class Arm:
                     high = max(frame[index] for frame in dance_frames)
                     if low < self.firmware_min[name] or high > self.firmware_max[name]:
                         raise RuntimeError(f"Motor {index + 1} dance exceeds firmware bounds")
-            target = self.folded if pose == "fold" else self.home
+            target = self.extended if pose == "extend" else self.home
             envelope = self._fold_envelope(self.bounds)
             validate_pose(target, envelope)
             modes = self._read("Operating_Mode")
@@ -484,10 +490,25 @@ class Arm:
             self._check_snapshot(snapshot, bounds=envelope, overshoot=POSE_MEASURED_OVERSHOOT)
             self.error = None
             now = time.monotonic()
+            start_ticks = tuple(snapshot[name]["position"] for name in JOINT_NAMES)
+            # The Home↔Extend corridor must remain synchronized. Moving the
+            # shoulder ahead of the elbow can dip the wrist camera below Home.
+            coordinated = pose == "extend" or (
+                pose in ("home", "dance") and self._on_upright_corridor(start_ticks)
+            )
+            trajectory = (quintic_segment(start_ticks, target, EXTEND_VMAX, EXTEND_AMAX, EXTEND_FPS)
+                          if coordinated else None)
+            if trajectory is not None:
+                for frame in trajectory:
+                    validate_pose(frame, envelope)
+                    if any(not self.firmware_min[name] <= frame[index] <= self.firmware_max[name]
+                           for index, name in enumerate(JOINT_NAMES)):
+                        raise RuntimeError("Upright trajectory exceeds a firmware limit")
             self.hold = {
                 "token": uuid.uuid4().hex, "motor": None, "mode": "pose", "pose": pose,
                 "stage": "home" if pose == "dance" else None,
                 "dance_frames": dance_frames,
+                "trajectory": trajectory, "frame_index": 0,
                 "target": target, "bounds": envelope,
                 "start_positions": {name: snapshot[name]["position"] for name in JOINT_NAMES},
                 "measured": {name: snapshot[name]["position"] for name in JOINT_NAMES},
@@ -496,11 +517,20 @@ class Arm:
                 "high_load": {name: 0 for name in JOINT_NAMES},
                 "trim_pending": set(),
                 "writes": 0, "progress": 0.0,
-                "next": now, "last_update": now, "expires": now + POSE_TIMEOUT_SECONDS,
+                "next": now, "last_update": now,
+                "expires": now + max(POSE_TIMEOUT_SECONDS,
+                                     len(trajectory) / EXTEND_FPS + 30 if trajectory else 0),
             }
             self.telemetry.write("motion_started", mode="pose", pose=pose,
                                  target=list(target), snapshot=snapshot)
             return {"token": self.hold["token"], "pose": pose}
+
+    def _on_upright_corridor(self, ticks):
+        fractions = []
+        for index in (1, 2):
+            span = self.extended[index] - self.home[index]
+            fractions.append((ticks[index] - self.home[index]) / span)
+        return all(-0.08 <= fraction <= 1.08 for fraction in fractions) and abs(fractions[0] - fractions[1]) <= 0.15
 
     def pose_stop(self):
         with self.lock:
@@ -512,6 +542,9 @@ class Arm:
         hold = self.hold
         if hold["pose"] == "dance" and hold["stage"] == "playback":
             self._advance_dance(now)
+            return
+        if hold.get("trajectory") is not None:
+            self._advance_upright_trajectory(now)
             return
         snapshot = self._snapshot()
         self._check_snapshot(snapshot, bounds=hold["bounds"], overshoot=POSE_MEASURED_OVERSHOOT)
@@ -593,6 +626,69 @@ class Arm:
         hold["writes"] += 1
         hold["last_update"] = now
         hold["next"] = now + (HOME_TRIM_PERIOD if trimming else POSE_STEP_SECONDS)
+
+    def _advance_upright_trajectory(self, now):
+        """Track one coordinated Home/Extend segment using encoder feedback."""
+        hold = self.hold
+        snapshot = self._snapshot()
+        envelope = hold["bounds"]
+        self._check_snapshot(snapshot, bounds=envelope, overshoot=POSE_MEASURED_OVERSHOOT)
+        positions = {name: snapshot[name]["position"] for name in JOINT_NAMES}
+        hold["measured"] = positions
+        frames = hold["trajectory"]
+        frame_index = min(hold["frame_index"], len(frames) - 1)
+        frame = frames[frame_index]
+        goals = {}
+        behind = False
+        for index, name in enumerate(JOINT_NAMES):
+            position = positions[name]
+            load = abs(snapshot[name]["load"])
+            hold["high_load"][name] = hold["high_load"][name] + 1 if load >= MAX_LOAD else 0
+            if hold["high_load"][name] >= 3:
+                raise RuntimeError(f"Motor {index + 1} sustained high load {load}")
+            if abs(position - hold["progress_position"][name]) >= POSE_STALL_TICKS:
+                hold["progress_position"][name] = position
+                hold["progress_time"][name] = now
+            elif (abs(frame[index] - position) > POSE_TOLERANCE
+                  and now - hold["progress_time"][name] >= POSE_STALL_SECONDS):
+                raise RuntimeError(f"Motor {index + 1} stalled at {position}")
+            distance = frame[index] - position
+            behind |= abs(distance) > EXTEND_MAX_LEAD
+            goals[name] = position + max(-EXTEND_MAX_LEAD, min(EXTEND_MAX_LEAD, distance))
+        validate_pose(tuple(goals[name] for name in JOINT_NAMES), envelope)
+        for name in JOINT_NAMES:
+            if not self.firmware_min[name] <= goals[name] <= self.firmware_max[name]:
+                raise RuntimeError(f"{name} trajectory goal exceeds firmware limits")
+        if frame_index == len(frames) - 1 and all(
+            abs(hold["target"][index] - positions[name]) <= POSE_TOLERANCE
+            for index, name in enumerate(JOINT_NAMES)
+        ):
+            # Keep the exact validated pose as the holding goal. Never drop torque.
+            self.bus.sync_write("Goal_Position", dict(zip(JOINT_NAMES, hold["target"], strict=True)),
+                                normalize=False)
+            if hold["pose"] == "dance" and hold["stage"] == "home":
+                hold["trajectory"] = None
+                hold["stage"] = "entry"
+                hold["target"] = DANCE_CENTER
+                hold["start_positions"] = positions
+                hold["progress_position"] = positions.copy()
+                hold["progress_time"] = {name: now for name in JOINT_NAMES}
+                hold["trim_pending"] = set()
+                hold["progress"] = .05
+                hold["next"] = now + POSE_STEP_SECONDS
+                hold["expires"] = now + 60
+            else:
+                hold["progress"] = 1.0
+                self.hold = None
+            return
+        self.bus.sync_write("Goal_Position", goals, normalize=False)
+        hold["writes"] += 1
+        hold["last_update"] = now
+        if not behind and hold["frame_index"] < len(frames) - 1:
+            hold["frame_index"] += 1
+        fraction = hold["frame_index"] / max(1, len(frames) - 1)
+        hold["progress"] = .05 * fraction if hold["pose"] == "dance" else fraction
+        hold["next"] = now + 1 / EXTEND_FPS
 
     def _advance_dance(self, now):
         hold = self.hold
@@ -829,6 +925,23 @@ def motor_id(value):
 
 
 ACCEPTED_HOSTNAMES = ("localhost", "127.0.0.1", "pi", "pi.local")
+VOICE_URL = "http://127.0.0.1:8770"
+
+
+def voice_state():
+    """Expose only the voice switch state, not transcripts or room audio."""
+    with urlopen(f"{VOICE_URL}/state", timeout=3) as response:
+        state = json.load(response)
+    return {"enabled": state["listening"], "stt_mode": state.get("stt_mode", "unknown")}
+
+
+def set_voice_enabled(enabled):
+    payload = json.dumps({"enabled": enabled}).encode()
+    request = Request(f"{VOICE_URL}/listen", data=payload,
+                      headers={"Content-Type": "application/json"}, method="POST")
+    with urlopen(request, timeout=3) as response:
+        response.read()
+    return {"enabled": enabled}
 
 
 def handler_for(arm, port):
@@ -908,6 +1021,12 @@ def handler_for(arm, port):
                 except Exception as exc:
                     logging.exception("State read failed")
                     self.reply(503, {"error": f"Motor communication error: {exc}"})
+            elif path == "/api/transcription":
+                try:
+                    self.reply(200, voice_state())
+                except (OSError, URLError, ValueError, KeyError, TypeError) as exc:
+                    logging.warning("Voice service unavailable: %s", type(exc).__name__)
+                    self.reply(503, {"error": "Transcription service unavailable"})
             elif path == "/api/diagnostics":
                 try:
                     self.reply(200, arm.diagnostics())
@@ -930,7 +1049,16 @@ def handler_for(arm, port):
                 if not isinstance(data, dict):
                     raise ValueError("JSON body must be an object")
                 path = urlsplit(self.path).path
-                if path == "/api/hold/start":
+                if path == "/api/transcription":
+                    if set(data) != {"enabled"} or type(data["enabled"]) is not bool:
+                        raise ValueError("enabled must be boolean")
+                    try:
+                        result = set_voice_enabled(data["enabled"])
+                    except (OSError, URLError, ValueError) as exc:
+                        logging.warning("Voice service unavailable: %s", type(exc).__name__)
+                        self.reply(503, {"error": "Transcription service unavailable"})
+                        return
+                elif path == "/api/hold/start":
                     motor = motor_id(data.get("motor"))
                     direction = data.get("direction")
                     if type(direction) is not int or direction not in (-1, 1):
@@ -952,8 +1080,8 @@ def handler_for(arm, port):
                     result = {"ok": True}
                 elif path == "/api/pose/start":
                     pose = data.get("pose")
-                    if pose not in ("home", "fold", "dance"):
-                        raise ValueError("pose must be 'home', 'fold', or 'dance'")
+                    if pose not in ("home", "extend", "dance"):
+                        raise ValueError("pose must be 'home', 'extend', or 'dance'; folded pose is unavailable with the wrist camera")
                     result = arm.pose_start(pose)
                 elif path == "/api/pose/stop":
                     result = arm.pose_stop()
