@@ -167,18 +167,24 @@ class Arm:
             return low, position, True, False
         return low, high, position > low, position < high
 
-    def _check_snapshot(self, snapshot, *, need_torque=True, bounds=None, overshoot=0):
+    def _check_snapshot(self, snapshot, *, need_torque=True, bounds=None, overshoot=0,
+                        moving_motor=None):
         for index, name in enumerate(JOINT_NAMES):
             joint = snapshot[name]
-            if joint["status"] != 0:
-                if joint["status"] == 1:
-                    raise RuntimeError(f"Motor {index + 1} voltage alarm (servo status 1)")
-                raise RuntimeError(f"Motor {index + 1} servo fault {joint['status']}")
-            if need_torque and joint["torque"] != 1:
-                raise RuntimeError(f"Motor {index + 1} torque is off; use Hold all joints first")
+            # Voltage is shared across the bus: a sag on any servo must still
+            # stop motion. Other faults are local to a servo, so a single-joint
+            # jog does not command or depend on a different faulted motor.
+            if joint["status"] & 1:
+                raise RuntimeError(f"Motor {index + 1} voltage alarm (servo status {joint['status']})")
             if joint["voltage"] < MIN_VOLTAGE_RAW:
                 if self._read("Present_Voltage")[name] < MIN_VOLTAGE_RAW:
                     raise RuntimeError(f"Motor {index + 1} voltage stayed low")
+            if moving_motor is not None and index + 1 != moving_motor:
+                continue
+            if joint["status"] != 0:
+                raise RuntimeError(f"Motor {index + 1} servo fault {joint['status']}")
+            if need_torque and joint["torque"] != 1:
+                raise RuntimeError(f"Motor {index + 1} torque is off; use Hold all joints first")
             if joint["temperature"] > 55:
                 raise RuntimeError(f"Motor {index + 1} is too hot")
             position = joint["position"]
@@ -265,7 +271,6 @@ class Arm:
     def state(self):
         with self.lock:
             snapshot = self._snapshot()
-            all_powered = all(snapshot[name]["torque"] == 1 for name in JOINT_NAMES)
             motors = []
             for index, (name, label) in enumerate(zip(JOINT_NAMES, LABELS, strict=True)):
                 joint = snapshot[name]
@@ -273,9 +278,10 @@ class Arm:
                     low, high, backward, forward = self._safe_span(index, joint["position"])
                 except ValueError:
                     low, high, backward, forward = self.bounds.lower[index], self.bounds.upper[index], False, False
-                fault = ("Voltage alarm (status 1)" if joint["status"] == 1 else
+                fault = (f"Voltage alarm (status {joint['status']})" if joint["status"] & 1 else
+                         "Overload protection (status 32)" if joint["status"] == 32 else
                          f"Servo fault {joint['status']}" if joint["status"] else None)
-                enabled = all_powered and fault is None and joint["voltage"] >= MIN_VOLTAGE_RAW
+                enabled = joint["torque"] == 1 and fault is None and joint["voltage"] >= MIN_VOLTAGE_RAW
                 setting = self.settings[str(index + 1)]
                 motors.append({
                     "id": index + 1, "name": label, "position": joint["position"],
@@ -293,8 +299,9 @@ class Arm:
             pose = self.hold if self.hold is not None and self.hold["mode"] == "pose" else None
             return {
                 "motors": motors, "holding": self.hold["motor"] if self.hold else None,
-                "error": self.error, "motion_enabled": all_powered,
-                "hold_all_enabled": not all_powered and not any(m["fault"] for m in motors),
+                "error": self.error, "motion_enabled": any(m["motion_enabled"] for m in motors),
+                "pose_enabled": all(m["motion_enabled"] for m in motors),
+                "hold_all_enabled": not all(m["torque"] for m in motors) and not any(m["fault"] for m in motors),
                 "folded_ticks": dict(zip(JOINT_NAMES, self.folded, strict=True)),
                 "pose": {
                     "active": pose is not None,
@@ -328,7 +335,7 @@ class Arm:
                 raise ValueError("A pose move is in progress; cancel it before jogging")
             self._stop()
             snapshot = self._snapshot()
-            self._check_snapshot(snapshot)
+            self._check_snapshot(snapshot, moving_motor=motor)
             name = JOINT_NAMES[motor - 1]
             position = snapshot[name]["position"]
             _, _, backward, forward = self._safe_span(motor - 1, position)
@@ -346,7 +353,7 @@ class Arm:
                 raise ValueError("Target must be an integer tick")
             self._stop()
             snapshot = self._snapshot()
-            self._check_snapshot(snapshot)
+            self._check_snapshot(snapshot, moving_motor=6)
             position = snapshot["gripper"]["position"]
             low, high, backward, forward = self._safe_span(5, position)
             if not low <= target <= high or (target > position and not forward) or (target < position and not backward):
@@ -568,7 +575,7 @@ class Arm:
             self._advance_pose(now)
             return
         snapshot = self._snapshot()
-        self._check_snapshot(snapshot)
+        self._check_snapshot(snapshot, moving_motor=hold["motor"])
         index = hold["motor"] - 1
         name = JOINT_NAMES[index]
         position = snapshot[name]["position"]

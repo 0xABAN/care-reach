@@ -209,18 +209,18 @@
         const homeBtn = document.getElementById('pose-home');
         const foldBtn = document.getElementById('pose-fold');
         const danceBtn = document.getElementById('pose-dance');
-        homeBtn.disabled = !state.motion_enabled || (poseActive && pose.name !== 'home');
-        foldBtn.disabled = !state.motion_enabled || (poseActive && pose.name !== 'fold');
-        danceBtn.disabled = !state.motion_enabled || (poseActive && pose.name !== 'dance');
+        homeBtn.disabled = !state.pose_enabled || (poseActive && pose.name !== 'home');
+        foldBtn.disabled = !state.pose_enabled || (poseActive && pose.name !== 'fold');
+        danceBtn.disabled = !state.pose_enabled || (poseActive && pose.name !== 'dance');
         homeBtn.classList.toggle('active', poseActive && pose.name === 'home');
         foldBtn.classList.toggle('active', poseActive && pose.name === 'fold');
         danceBtn.classList.toggle('active', poseActive && pose.name === 'dance');
         document.getElementById('hold-all').disabled = !state.hold_all_enabled || poseActive;
         if (state.error) show(state.error, true);
         else if (poseActive) show(`${pose.name === 'dance' ? 'Dancing' : `Moving to ${pose.name}`} · ${Math.round(pose.progress * 100)}% · press ${pose.name} again to cancel`);
-        else if (faulted.length) show(`Servo fault on motor${faulted.length > 1 ? 's' : ''} ${faulted.join(', ')}.`, true);
+        else if (faulted.length) show(`Motor${faulted.length > 1 ? 's' : ''} ${faulted.join(', ')} faulted · healthy joints can still jog; group poses are paused.`, true);
         else if (state.holding === 6 && !press) show('Motor 6 moving to target');
-        else if (!press) show(state.motion_enabled ? 'All six joints ready · release a direction to hold position' : 'Torque is off · use Hold all joints to enable movement');
+        else if (!press) show(state.motion_enabled ? 'Joints ready · release a direction to hold position' : 'Torque is off · use Hold all joints to enable movement');
         else show(`Moving motor ${press.motor} · release to stop`);
       } catch (error) { show(error.message, true); endPress(); }
     }

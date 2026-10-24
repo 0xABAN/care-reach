@@ -135,6 +135,32 @@ class DashboardTests(DashboardBase):
         self.assertEqual(bus.goals["gripper"], 2000)
         self.assertTrue(all(value == 1 for value in bus.torque.values()))
 
+    def test_faulted_gripper_does_not_block_healthy_jog_or_receive_commands(self):
+        bus = FakeBus((2000,) * 6)
+        bus.status["gripper"] = 32
+        arm = self.arm(bus)
+        state = arm.state()
+        self.assertTrue(state["motors"][0]["motion_enabled"])
+        self.assertFalse(state["motors"][5]["motion_enabled"])
+        self.assertFalse(state["pose_enabled"])
+        token = arm.start(1, 1)
+        arm._advance(time.monotonic() + 0.08)
+        arm.stop(token)
+        self.assertTrue(bus.writes)
+        self.assertTrue(all(write[1] == "shoulder_pan" for write in bus.writes))
+        with self.assertRaisesRegex(RuntimeError, "Motor 6 servo fault 32"):
+            arm.start(6, 1)
+        with self.assertRaisesRegex(RuntimeError, "Motor 6 servo fault 32"):
+            arm.pose_start("home")
+
+    def test_inactive_voltage_alarm_still_blocks_a_jog(self):
+        bus = FakeBus((2000,) * 6)
+        bus.status["gripper"] = 1
+        arm = self.arm(bus)
+        with self.assertRaisesRegex(RuntimeError, "Motor 6 voltage alarm"):
+            arm.start(1, 1)
+        self.assertEqual(bus.writes, [])
+
     def test_folded_endpoint_only_allows_motion_toward_normal_limits(self):
         bus = FakeBus((2040, 893, 3064, 2888, 2416, 1470))
         arm = self.arm(bus)
