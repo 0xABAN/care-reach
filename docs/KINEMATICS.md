@@ -47,6 +47,28 @@ regularized or waypoint-aware solver: repeated Z corrections in the first
 live trial did not converge below about 8 mm and eventually reached the
 joint-jump guard. No automatic Cartesian correction loop is enabled.
 
+## Live validation, 2026-10-24
+
+Eight nearby paired Cartesian steps were run on the assembled Pi-connected
+arm with 15-tick deadband trimming and `orientation_weight=0`. All eight
+completed without a servo fault; torque stayed enabled. Predicted endpoints
+were within 0.06–0.50 mm of each requested target in the URDF model. Encoder
+positions read after settling imply these actual **model-space** translations:
+
+| Request | Encoder-based FK translation (mm) |
+| --- | --- |
+| X −20, then +20 | (−18.9, +2.1, −6.7), then (+19.8, −3.9, −6.9) |
+| Y +30, then −30 | (+0.3, +30.7, −4.5), then (−0.0, −31.4, −9.5) |
+| Z +20, then −20 | (+1.6, +0.2, +13.1), then (+0.6, −0.1, −25.6) |
+| Diagonal ±15 on each axis | (+16.0, +18.9, +9.4), then (−14.7, −17.6, −19.7) |
+
+This distinguishes solver accuracy from actuator tracking: a valid IK target
+does not mean the encoders reached that joint target, and encoder-based FK is
+not an external measurement of the tool. The arm returned to Home afterward
+with all joints within 9 ticks, goals at 2000, torque enabled, and no faults.
+The dashboard service was restored. More aggressive automatic corrections
+should wait for a better-conditioned solver and an observed tool pose.
+
 This is *local* IK from a measured pose, not a collision-aware path planner.
 The official URDF reports self-collisions even in neutral, and its base
 collision geometry is incomplete. We have not measured the real tool's
