@@ -66,6 +66,27 @@ class FakeBus:
 
 
 class RunnerTests(unittest.TestCase):
+    def test_deadband_trim_reaches_precise_target_and_holds_it(self):
+        class DeadbandBus(FakeBus):
+            def sync_write(self, register, goals, normalize=True):
+                assert self.connected and register == "Goal_Position" and not normalize
+                self.writes.append(goals.copy())
+                for name in JOINT_NAMES:
+                    distance = goals[name] - self.positions[name]
+                    if abs(distance) >= 35:
+                        self.positions[name] += max(-8, min(8, distance))
+
+        bus = DeadbandBus("unused")
+        target = (2000, 2120, 1880, 2070, 2000, 2000)
+        result = MeasuredPoseRunner("unused", BOUNDS, bus_factory=lambda _: bus,
+                                    clock=FakeClock()).move(
+            target, tolerance=15, stall_s=6, trim_deadband=True,
+            hold_target_on_success=True)
+        self.assertTrue(all(abs(result["positions"][name] - target[i]) <= 15
+                            for i, name in enumerate(JOINT_NAMES)))
+        self.assertEqual(bus.writes[-1], dict(zip(JOINT_NAMES, target)))
+        self.assertEqual(bus.disconnects, [False])
+
     def test_slow_encoder_reaches_fold_with_measured_lead(self):
         bus = FakeBus("unused")
         bus.positions["shoulder_lift"] = 1132

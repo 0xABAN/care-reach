@@ -30,6 +30,14 @@ progress while moving. Only one process may own the URT-2 bus. Stop the
 dashboard service before a direct-serial test and restart it afterward.
 Neither operation releases torque.
 
+For Cartesian trials, use `MeasuredPoseRunner.move(..., tolerance=15,
+trim_deadband=True, hold_target_on_success=True)` and read the encoders again
+after the goal settles. The opt-in trim sends short bounded goals beyond small
+remaining errors to overcome servo deadband; the exact endpoint then remains
+the holding goal. A runner stop or fault still holds measured position. Check
+the measured FK result after every leg, since a solved model pose is not proof
+that the servos reached it.
+
 This is *local* IK from a measured pose, not a collision-aware path planner.
 The official URDF reports self-collisions even in neutral, and its base
 collision geometry is incomplete. We have not measured the real tool's
