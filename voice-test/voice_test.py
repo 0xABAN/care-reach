@@ -124,8 +124,11 @@ class Trial:
 
 
 class VoiceTest:
-    def __init__(self, device: str, api_key: str):
+    def __init__(self, device: str, api_key: str, *, backend: str = "avfoundation"):
         self.device = device
+        self.backend = backend
+        self.dashboard_file = ROOT / "dashboard.html"
+        self.example_phrase = "pick up the can"
         self.client = Cartesia(api_key=api_key)
         self.trials_path = REPORTS / f"trials-{MODEL_ID}.csv"
         self.events_path = REPORTS / f"events-{MODEL_ID}.csv"
@@ -179,13 +182,27 @@ class VoiceTest:
                 self.end_headers()
                 self.wfile.write(body)
 
+            def trusted_request(self) -> bool:
+                host = self.headers.get("Host", "")
+                if host not in {f"127.0.0.1:{port}", f"localhost:{port}"}:
+                    self.respond(403, b"Invalid host", "text/plain")
+                    return False
+                origin = self.headers.get("Origin")
+                if origin and origin != f"http://{host}":
+                    self.respond(403, b"Invalid origin", "text/plain")
+                    return False
+                return True
+
             def do_GET(self) -> None:
+                if not self.trusted_request():
+                    return
                 if self.path == "/":
-                    self.respond(200, (ROOT / "dashboard.html").read_bytes(), "text/html; charset=utf-8")
+                    self.respond(200, app.dashboard_file.read_bytes(), "text/html; charset=utf-8")
                 elif self.path == "/state":
                     with app.ui_lock:
                         state = dict(app.ui)
                         state["messages"] = list(app.messages)
+                    state.update(app.extra_state())
                     path = REPORTS / "latest.md"
                     state["report"] = path.read_text(encoding="utf-8") if path.exists() else "No trials yet."
                     self.respond(200, json.dumps(state).encode(), "application/json")
@@ -199,6 +216,22 @@ class VoiceTest:
                     self.respond(404, b"Not found", "text/plain")
 
             def do_POST(self) -> None:
+                if not self.trusted_request():
+                    return
+                if self.path == "/arm":
+                    try:
+                        if self.headers.get("Content-Type", "").split(";", 1)[0] != "application/json":
+                            raise ValueError("JSON required")
+                        length = min(int(self.headers.get("Content-Length", "0")), 1000)
+                        enabled = json.loads(self.rfile.read(length))["enabled"]
+                        if not isinstance(enabled, bool):
+                            raise ValueError("enabled must be boolean")
+                        app.set_arm_enabled(enabled)
+                    except (ValueError, KeyError, TypeError, NotImplementedError):
+                        self.respond(400, b"Arm control unavailable", "text/plain")
+                        return
+                    self.respond(200, b"OK", "text/plain")
+                    return
                 if self.path == "/listen":
                     length = min(int(self.headers.get("Content-Length", "0")), 1000)
                     try:
@@ -228,7 +261,7 @@ class VoiceTest:
                 except (ValueError, KeyError, TypeError):
                     self.respond(400, b"Invalid request", "text/plain")
                     return
-                if expected not in {"pick_up_can", "cancel", "stop", "none"}:
+                if expected not in {"pick_up_can", "open_gripper", "cancel", "stop", "none"}:
                     self.respond(400, b"Invalid trial", "text/plain")
                     return
                 if not app.listening:
@@ -241,11 +274,13 @@ class VoiceTest:
         self.print(f"[dashboard] Open http://127.0.0.1:{port}")
 
     def start_capture(self) -> None:
-        command = [
-            "ffmpeg", "-nostdin", "-loglevel", "error", "-f", "avfoundation",
-            "-i", f":{self.device}", "-ac", "1", "-ar", str(SAMPLE_RATE),
-            "-f", "s16le", "pipe:1",
-        ]
+        command = ["ffmpeg", "-nostdin", "-loglevel", "error", "-f", self.backend]
+        if self.backend == "alsa":
+            command.extend(["-channels", "1", "-sample_rate", "44100"])
+        command.extend([
+            "-i", f":{self.device}" if self.backend == "avfoundation" else self.device,
+            "-ac", "1", "-ar", str(SAMPLE_RATE), "-f", "s16le", "pipe:1",
+        ])
         self.capture = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         threading.Thread(target=self.read_audio, daemon=True).start()
         threading.Thread(target=self.read_commands, daemon=True).start()
@@ -285,7 +320,7 @@ class VoiceTest:
                 self.stop.set()
             elif parts[0] == "report":
                 self.print(f"[report] {report()}")
-            elif parts[0] == "test" and len(parts) == 2 and parts[1] in {"pick_up_can", "cancel", "stop", "none"}:
+            elif parts[0] == "test" and len(parts) == 2 and parts[1] in {"pick_up_can", "open_gripper", "cancel", "stop", "none"}:
                 if self.trial:
                     self.finish_trial("replaced")
                 self.trial = Trial(self.next_trial_id, parts[1], time.monotonic() + TRIAL_SECONDS)
@@ -295,7 +330,7 @@ class VoiceTest:
                     self.ui.update(trial=f"Trial {self.trial.id}: {parts[1]} ({TRIAL_SECONDS} seconds)", raw="", decision="", command="", latency_ms=None)
                 self.print(f"[test {self.trial.id}] Expected: {parts[1]}. Speak now; trial lasts {TRIAL_SECONDS} seconds.")
             else:
-                self.print("[help] Type: test pick_up_can | test cancel | test stop | test none | report | quit")
+                self.print("[help] Type: test open_gripper | test pick_up_can | test cancel | test stop | test none | report | quit")
 
     def finish_trial(self, reason: str = "timeout") -> None:
         trial = self.trial
@@ -353,6 +388,7 @@ class VoiceTest:
     def process_utterance(self, pcm: bytes) -> None:
         if not self.listening:
             return
+        decision_started = time.monotonic()
         if self.save_next_audio:
             path = REPORTS / "last-utterance.wav"
             with wave.open(str(path), "wb") as wav:
@@ -363,7 +399,7 @@ class VoiceTest:
             self.save_next_audio = False
             with self.ui_lock:
                 self.ui["audio_sequence"] += 1
-            self.print("[diagnostic] Saved the last utterance on this Mac. Use Replay in the dashboard.")
+            self.print("[diagnostic] Saved the last utterance locally. Use Replay in the dashboard.")
         self.print("[status] Sending utterance to Cartesia...")
         raw, latency_ms = self.transcribe(pcm)
         wake, remainder = split_wake(raw)
@@ -380,40 +416,55 @@ class VoiceTest:
         if wake or armed:
             candidate = remainder if wake else normalize(raw)
             if candidate:
-                command = classify(candidate) or ""
+                command = self.choose_command(candidate) or ""
                 decision = "accepted" if command else "rejected"
                 self.armed_until = 0.0
+        action = self.execute_command(command) if command else ""
+        total_latency_ms = round((time.monotonic() - decision_started) * 1000)
         self.print(f"[heard] {raw or '(nothing)'}")
-        self.print(f"[decision] {decision}" + (f": {command}" if command else "") + f" | transcription {latency_ms} ms")
+        self.print(f"[decision] {decision}" + (f": {command}" if command else "") + f" | response {total_latency_ms} ms" + (f" | action: {action}" if action else ""))
         with self.ui_lock:
-            self.ui.update(raw=raw or "(nothing)", decision=decision, command=command, latency_ms=latency_ms)
+            self.ui.update(raw=raw or "(nothing)", decision=decision, command=command,
+                           latency_ms=latency_ms, total_latency_ms=total_latency_ms, action=action)
         write_row(self.events_path, EVENT_FIELDS, {
             "time": datetime.now().astimezone().isoformat(timespec="seconds"),
             "trial_id": self.trial.id if self.trial else "", "raw_text": raw,
             "wake_detected": wake, "decision": decision, "command": command,
-            "latency_ms": latency_ms,
+            "latency_ms": total_latency_ms,
         })
         if self.trial and command:
             self.trial.observed = command
-            self.trial.latency_ms = latency_ms
+            self.trial.latency_ms = total_latency_ms
             if self.trial.expected != "none":
                 self.finish_trial()
         if not self.listening:
             self.print("[status] Paused. No audio sent to Cartesia.")
         elif self.armed_until:
-            self.print("[status] Wake heard. Say 'pick up the can' now...")
+            self.print(f"[status] Wake heard. Say '{self.example_phrase}' now...")
         else:
             self.print("[status] Waiting for 'Hey Arm'...")
+
+    def choose_command(self, text: str) -> str | None:
+        return classify(text)
+
+    def execute_command(self, command: str) -> str:
+        return "Test only; no arm connected"
+
+    def extra_state(self) -> dict:
+        return {}
+
+    def set_arm_enabled(self, enabled: bool) -> None:
+        raise NotImplementedError
 
     def run(self, port: int) -> None:
         REPORTS.mkdir(exist_ok=True)
         report()
         self.start_web(port)
         self.start_capture()
-        self.print(f"[status] Starting USB microphone (AVFoundation audio device {self.device}); speech is sent to Cartesia")
-        self.print("[status] Waiting for 'Hey Arm'... Speak 'Hey Arm, pick up the can'.")
-        self.print("[help] For scored trials type: test pick_up_can | test cancel | test stop | test none")
-        self.print("[help] Type report for counts, quit to stop. No arm control is connected.")
+        self.print(f"[status] Starting USB microphone ({self.backend} device {self.device}); speech is sent to Cartesia")
+        self.print(f"[status] Waiting for 'Hey Arm'... Speak 'Hey Arm, {self.example_phrase}'.")
+        self.print("[help] For scored trials type: test open_gripper | test pick_up_can | test cancel | test stop | test none")
+        self.print("[help] Type report for counts, quit to stop.")
         try:
             while not self.stop.is_set():
                 self.handle_console()

@@ -1,0 +1,17 @@
+[Unit]
+Description=Care Reach Pi USB microphone voice test
+After=care-reach-dashboard.service
+Wants=care-reach-dashboard.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/robot/care-reach-voice
+EnvironmentFile=/home/robot/.config/care-reach/voice.env
+ExecStart=/home/robot/care-reach-voice/.venv/bin/python -u /home/robot/care-reach-voice/pi_voice.py --device hw:2,0 --port 8770
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target
