@@ -2,4 +2,5 @@
 
 ## ROS setup
 
-See [ros2/README.md](ros2/README.md) for the local ROS 2 Jazzy setup for the SO-101 robot.
+- [Mac-local ROS 2 Jazzy setup](ros2/README.md)
+- [Raspberry Pi 5 setup with current 64-bit Raspberry Pi OS](ros2/PI5.md)
