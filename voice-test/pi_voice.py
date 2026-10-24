@@ -81,7 +81,6 @@ class PiVoiceTest(VoiceTest):
         self.silence_frames_required = 30
         self.arm_enabled_until = 0.0
         self.arm_enable_status = "Not enabled yet"
-        self.command_latency_ms: int | None = None
         self.openrouter_disabled = os.environ.get("OPENROUTER_DISABLED") == "1"
         self.command_backend = ("Local exact phrases (OpenRouter key rejected)"
                                 if self.openrouter_disabled else "OpenRouter (awaiting first command)")

@@ -146,6 +146,7 @@ class VoiceTest:
         self.speech_frames = 0
         self.quiet_frames = 0
         self.silence_frames_required = 45
+        self.command_latency_ms: int | None = None
         self.hot_frames = 0
         self.ui_lock = threading.Lock()
         self.ui = {"status": "Starting", "model": MODEL_NAME, "listening": True, "raw": "", "decision": "", "command": "", "latency_ms": None,
@@ -390,6 +391,7 @@ class VoiceTest:
     def process_utterance(self, pcm: bytes) -> None:
         if not self.listening:
             return
+        self.command_latency_ms = None
         decision_started = time.monotonic()
         if self.save_next_audio:
             path = REPORTS / "last-utterance.wav"
