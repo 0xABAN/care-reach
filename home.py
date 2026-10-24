@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Move all six SO-101 joints toward the 2000-tick home pose together.
+"""Move all six SO-101 joints toward the recorded Home pose together.
 
 Torque remains enabled on exit, including errors and Ctrl-C. Keep the arm clear
 of obstacles and leave servo power connected while it holds its pose.
@@ -9,9 +9,11 @@ import argparse
 import time
 
 from lerobot.motors import Motor, MotorNormMode, SerialMotorsBus
+from home_pose import home_target
+from motion_core import JOINT_NAMES
 
-NAMES = ("shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper")
-HOME = 2000
+NAMES = JOINT_NAMES
+HOME = home_target()
 TOLERANCE = 15
 MAX_STEP = 100
 GOAL_SPEED = 2  # About 100 encoder ticks/s with the current servo phase.
@@ -42,13 +44,15 @@ def main(argv=None):
 
     try:
         # Certain calibrated STS3215 firmware bounds make a valid goal drive in
-        # the wrong direction. Widen only these four known affected motors; the
-        # trajectory below enforces the 2000-tick target and bounded steps.
+        # the wrong direction. Keep motor 3's maximum at least as high as its
+        # recorded Home, without raising it beyond that position here.
         for i in (2, 3, 4, 6):
             name = NAMES[i - 1]
             if read("Min_Position_Limit", name) != 0:
                 write("Min_Position_Limit", name, 0)
-            if read("Max_Position_Limit", name) != 4095:
+            if i == 3 and read("Max_Position_Limit", name) < HOME[2]:
+                raise RuntimeError("Motor 3 firmware maximum is below recorded Home")
+            if i != 3 and read("Max_Position_Limit", name) != 4095:
                 write("Max_Position_Limit", name, 4095)
 
         for i, name in enumerate(NAMES, 1):
@@ -78,26 +82,29 @@ def main(argv=None):
             print(f"{cycle:02d} {positions}", flush=True)
             if any(v["status"] or v["voltage"] < 48 or v["torque"] != 1 for v in state.values()):
                 raise RuntimeError(f"Servo fault, low voltage, or lost torque: {state}")
-            if all(abs(p - HOME) <= TOLERANCE for p in positions.values()):
-                for name in NAMES:
-                    write("Goal_Position", name, HOME)
+            if all(abs(positions[i] - HOME[i - 1]) <= TOLERANCE for i in range(1, 7)):
+                for i, name in enumerate(NAMES):
+                    write("Goal_Position", name, HOME[i])
                 print("HOME REACHED; torque remains enabled", flush=True)
                 return
 
             # Command every joint on every cycle, including joints already home.
-            for name in NAMES:
+            for i, name in enumerate(NAMES):
                 position = state[name]["position"]
-                error = position - HOME
+                target = HOME[i]
+                error = position - target
                 if name in trim_pending:
-                    goal = HOME
+                    goal = target
                     trim_pending.remove(name)
                 elif TOLERANCE < abs(error) <= 40:
                     # A small error may sit in the servo's static-friction deadband.
-                    # Briefly approach from beyond home, then settle at 2000.
-                    goal = HOME - (40 if error > 0 else -40)
+                    # Briefly approach from beyond home, then settle.
+                    goal = target - (40 if error > 0 else -40)
+                    if name == "elbow_flex":
+                        goal = min(goal, target)
                     trim_pending.add(name)
                 else:
-                    goal = max(position - MAX_STEP, HOME) if error > 0 else min(position + MAX_STEP, HOME)
+                    goal = max(position - MAX_STEP, target) if error > 0 else min(position + MAX_STEP, target)
                 write("Goal_Position", name, goal)
             time.sleep(period_s)
         raise RuntimeError("Home timed out; torque remains enabled")

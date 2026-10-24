@@ -1,0 +1,14 @@
+{
+  "robot_id": "care_reach_follower",
+  "captured_date": "2026-10-24",
+  "capture_method": "Lance manually positioned the assembled arm and read raw encoder ticks",
+  "torque_enabled_at_capture": true,
+  "positions_ticks": {
+    "shoulder_pan": 2000,
+    "shoulder_lift": 1056,
+    "elbow_flex": 3065,
+    "wrist_flex": 2027,
+    "wrist_roll": 387,
+    "gripper": 1993
+  }
+}

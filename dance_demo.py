@@ -14,8 +14,12 @@ from pathlib import Path
 from typing import Sequence
 
 from motion_core import JOINT_NAMES, SafetyBounds, plan_blended_waypoints, validate_pose
+from home_pose import home_bounds, home_target
 
 
+RECORDED_HOME = home_target()
+# The choreography was measured around this ordinary-bounds center. The
+# recorded Home is reached separately before and after playback.
 HOME = (2000,) * 6
 # Each row controls one segment ending at the corresponding named pose. These
 # measured-arm rates stay near the pace of the first live dance; changing the
@@ -130,11 +134,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("dry run complete; no servo bus opened")
         return 0
 
-    # Runtime import and bus construction must remain below complete preflight.
+    # Enter and leave the choreography through guarded, measured moves. The
+    # choreography itself retains the ordinary software envelope.
+    from measured_pose_runner import MeasuredPoseRunner
     from arm_runtime import ArmRuntime
 
+    transition_bounds = home_bounds(bounds, RECORDED_HOME)
+    MeasuredPoseRunner(args.port, transition_bounds).move(HOME, max_lead=80,
+                                                            period_s=0.06, timeout_s=60, tolerance=15)
     with ArmRuntime(args.port, bounds) as runtime:
         result = runtime.run(frames, fps=args.fps)
+    MeasuredPoseRunner(args.port, transition_bounds).move(RECORDED_HOME, max_lead=80,
+                                                            period_s=0.06, timeout_s=60, tolerance=15)
     print(
         f"executed {result['frames_commanded']} frames in "
         f"{result['elapsed_s']:.1f}s; final {result['final_positions']}"

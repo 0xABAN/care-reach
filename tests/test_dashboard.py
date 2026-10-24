@@ -12,6 +12,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from motion_core import JOINT_NAMES
+from home_pose import home_target
 from server import Arm, GRIP_HOLD_LEAD, HOME_TOLERANCE, POSE_TOLERANCE, STOP_SETTLE_LEAD, handler_for
 
 
@@ -382,6 +383,7 @@ class DashboardTests(DashboardBase):
 
 class PoseTests(DashboardBase):
     FOLD = (2040, 893, 3064, 2888, 2416, 1470)
+    HOME = home_target()
 
     def run_pose(self, arm, seconds=120.0):
         start = time.monotonic()
@@ -400,8 +402,8 @@ class PoseTests(DashboardBase):
         done, steps = self.run_pose(arm)
         self.assertTrue(done, f"pose move did not finish in {steps} steps")
         for index, name in enumerate(JOINT_NAMES):
-            self.assertLessEqual(abs(bus.positions[name] - 2000), HOME_TOLERANCE, name)
-            self.assertEqual(bus.goals[name], 2000)
+            self.assertLessEqual(abs(bus.positions[name] - self.HOME[index]), HOME_TOLERANCE, name)
+            self.assertEqual(bus.goals[name], self.HOME[index])
         self.assertLessEqual(max(bus.leads), 80)
         self.assertGreater(len(bus.leads), 20)
         self.assertEqual(bus.disconnects, [])
@@ -409,15 +411,17 @@ class PoseTests(DashboardBase):
         self.assertFalse(arm.state()["pose"]["active"])
 
     def test_home_trims_a_joint_stuck_inside_the_old_completion_window(self):
-        bus = TrackingBus((2000, 2000, 2026, 2000, 2000, 2000))
+        bus = TrackingBus((2000, 1056, 3039, 2027, 387, 1993))
         arm = self.arm(bus)
         arm.pose_start("home")
         done, _ = self.run_pose(arm)
         self.assertTrue(done)
-        self.assertLessEqual(abs(bus.positions["elbow_flex"] - 2000), HOME_TOLERANCE)
+        self.assertLessEqual(abs(bus.positions["elbow_flex"] - self.HOME[2]), HOME_TOLERANCE)
         self.assertTrue(any(write[0] == "Goal_Position" and len(write) == 2
-                            and write[1]["elbow_flex"] == 1960 for write in bus.writes))
-        self.assertEqual(bus.goals["elbow_flex"], 2000)
+                            and write[1]["elbow_flex"] == 3065 for write in bus.writes))
+        self.assertFalse(any(write[0] == "Goal_Position" and len(write) == 2
+                             and write[1]["elbow_flex"] > 3065 for write in bus.writes))
+        self.assertEqual(bus.goals["elbow_flex"], 3065)
 
     def test_fold_from_home_reaches_recorded_fold(self):
         bus = TrackingBus((2000,) * 6)
@@ -443,9 +447,9 @@ class PoseTests(DashboardBase):
         self.assertLessEqual(max(bus.leads), 80)
         self.assertEqual(bus.disconnects, [])
         self.assertTrue(all(value == 1 for value in bus.torque.values()))
-        for name in JOINT_NAMES:
-            self.assertEqual(bus.goals[name], 2000)
-            self.assertLessEqual(abs(bus.positions[name] - 2000), HOME_TOLERANCE)
+        for index, name in enumerate(JOINT_NAMES):
+            self.assertEqual(bus.goals[name], self.HOME[index])
+            self.assertLessEqual(abs(bus.positions[name] - self.HOME[index]), HOME_TOLERANCE)
 
     def test_dance_cancel_holds_measured_and_blocks_jog(self):
         bus = TrackingBus((2000,) * 6)
@@ -767,7 +771,7 @@ class HttpHostTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertTrue(state["pose"]["active"])
         self.assertEqual(state["pose"]["name"], "home")
-        self.assertEqual(state["pose"]["target"], dict(zip(JOINT_NAMES, (2000,) * 6, strict=True)))
+        self.assertEqual(state["pose"]["target"], dict(zip(JOINT_NAMES, home_target(), strict=True)))
         status, payload = self.post(self.handler, "/api/pose/stop", {})
         self.assertEqual(status, 200)
         _, state = self.call(self.handler, {"Host": "127.0.0.1:8765"}, client_ip="127.0.0.1")

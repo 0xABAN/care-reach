@@ -15,9 +15,10 @@ from pathlib import Path
 from typing import Sequence
 
 from motion_core import JOINT_NAMES, SafetyBounds, UnsafePoseError, plan_blended_waypoints, validate_pose
+from home_pose import home_bounds, home_target
 
 
-HOME = (2000,) * 6
+HOME = home_target()
 POSE_PATH = Path(__file__).with_name("folded_pose.json")
 FOLD_VMAX = (150.0, 170.0, 170.0, 170.0, 200.0, 150.0)
 FOLD_AMAX = (240.0, 250.0, 250.0, 250.0, 300.0, 240.0)
@@ -73,7 +74,7 @@ def build_plan(
     if not isinstance(fps, int) or isinstance(fps, bool) or not 5 <= fps <= 50:
         raise ValueError("fps must be an integer between 5 and 50")
     target = folded_target(pose_path)
-    task_bounds = folded_bounds(bounds, target)
+    task_bounds = folded_bounds(home_bounds(bounds, HOME), target)
     validate_pose(HOME, task_bounds)
     frames = plan_blended_waypoints(HOME, (target,), task_bounds, FOLD_VMAX, FOLD_AMAX, fps=fps)
     if frames[0] != HOME or frames[-1] != target:
@@ -105,7 +106,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         bounds = SafetyBounds.from_files(args.settings, args.calibration)
         target, frames = build_plan(bounds, args.pose, fps=args.fps)
-        task_bounds = folded_bounds(bounds, target)
+        task_bounds = folded_bounds(home_bounds(bounds, HOME), target)
     except (ValueError, OSError) as exc:
         parser.error(str(exc))
 

@@ -13,9 +13,11 @@ from collections.abc import Iterable
 from typing import Any
 
 from motion_core import JOINT_NAMES, SafetyBounds, UnsafePoseError, validate_pose
+from home_pose import home_target
 
 
-HOME = 2000
+HOME = home_target()
+DANCE_CENTER = (2000,) * 6
 HOME_TOLERANCE = 120
 MIN_VOLTAGE_RAW = 48  # STS3215 register is in tenths of a volt.
 MAX_LOAD_MAGNITUDE = 900  # LeRobot decodes Present_Load as a signed value.
@@ -205,9 +207,12 @@ class ArmRuntime:
 
             initial = self._sample()
             self._check_state(initial)
-            for name in JOINT_NAMES:
-                if abs(initial[name]["position"] - HOME) > HOME_TOLERANCE:
-                    raise ArmSafetyError(f"{name}: startup is too far from home ({initial[name]['position']})")
+            if not any(
+                all(abs(initial[name]["position"] - reference[index]) <= HOME_TOLERANCE
+                    for index, name in enumerate(JOINT_NAMES))
+                for reference in (HOME, DANCE_CENTER)
+            ):
+                raise ArmSafetyError("startup is too far from Home or dance center")
 
             last_goal = {name: initial[name]["position"] for name in JOINT_NAMES}
             command_position = {name: float(last_goal[name]) for name in JOINT_NAMES}
@@ -310,8 +315,8 @@ class ArmRuntime:
                         raise ArmSafetyError(f"{name}: sustained high load {load}")
                     error = abs(last_goal[name] - position)
                     near_home_trim_window = (
-                        final_pose[index] == HOME
-                        and abs(position - HOME) <= HOME_TRIM_ERROR_WINDOW
+                        final_pose[index] in (HOME[index], DANCE_CENTER[index])
+                        and abs(position - final_pose[index]) <= HOME_TRIM_ERROR_WINDOW
                         and (
                             not trim_attempted[name]
                             or trim_target[name] is not None and error <= HOME_TRIM_ERROR_WINDOW
@@ -335,7 +340,7 @@ class ArmRuntime:
                         command_position[name] = float(position)
                         command_velocity[name] = 0.0
                     elif (
-                        final_pose[index] == HOME
+                        final_pose[index] in (HOME[index], DANCE_CENTER[index])
                         and not trim_attempted[name]
                         and abs(position - final_pose[index]) > finish_tolerance
                         and abs(last_goal[name] - position) <= HOME_TRIM_ERROR_WINDOW
@@ -350,6 +355,8 @@ class ArmRuntime:
                         )
                         trim_attempted[name] = True
                         stalled_since[name] = None
+                        if name == "elbow_flex":
+                            candidate = min(candidate, HOME[index])
                         if (
                             self.bounds.lower[index] <= candidate <= self.bounds.upper[index]
                             and firmware_min[name] <= candidate <= firmware_max[name]

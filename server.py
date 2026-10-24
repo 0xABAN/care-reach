@@ -22,8 +22,9 @@ from serial.tools import list_ports
 from lerobot.motors import Motor, MotorNormMode, SerialMotorsBus
 
 from motion_core import JOINT_NAMES, SafetyBounds, validate_pose
-from dance_demo import build_plan as build_dance_plan
-from park import HOME, folded_bounds, folded_target
+from dance_demo import HOME as DANCE_CENTER, build_plan as build_dance_plan
+from home_pose import home_bounds, home_target
+from park import folded_bounds, folded_target
 from telemetry import DEFAULT_PATH, TelemetryLog
 
 
@@ -98,8 +99,9 @@ class Arm:
         self.pose_path = pose_path
         self.settings = load_settings(self.settings_path)
         self.folded = folded_target(pose_path) if pose_path is not None else folded_target()
+        self.home = home_target()
         self.bounds = SafetyBounds.from_files(self.settings_path, self.calibration_path)
-        self.park_bounds = self._fold_envelope(self.bounds)
+        self.park_bounds = folded_bounds(home_bounds(self.bounds, self.home), self.folded)
         self.hold = None
         self.error = None
         self.closed = False
@@ -198,10 +200,7 @@ class Arm:
     def _fold_envelope(self, bounds):
         # The manually observed endpoint only permits a way back inside a
         # tighter saved bound. It is never an outward jog destination.
-        return SafetyBounds(
-            tuple(min(lo, tick) for lo, tick in zip(bounds.lower, self.folded, strict=True)),
-            tuple(max(hi, tick) for hi, tick in zip(bounds.upper, self.folded, strict=True)),
-        )
+        return folded_bounds(home_bounds(bounds, self.home), self.folded)
 
     def _safe_span(self, index, position):
         """Ordinary limits, plus an inward-only exit from the recorded fold."""
@@ -472,8 +471,8 @@ class Arm:
                     high = max(frame[index] for frame in dance_frames)
                     if low < self.firmware_min[name] or high > self.firmware_max[name]:
                         raise RuntimeError(f"Motor {index + 1} dance exceeds firmware bounds")
-            target = self.folded if pose == "fold" else HOME
-            envelope = folded_bounds(self.bounds, self.folded)
+            target = self.folded if pose == "fold" else self.home
+            envelope = self._fold_envelope(self.bounds)
             validate_pose(target, envelope)
             modes = self._read("Operating_Mode")
             if any(modes[name] != 0 for name in JOINT_NAMES):
@@ -536,10 +535,20 @@ class Arm:
             # the target backward to a still-moving encoder reading.
             self.bus.sync_write("Goal_Position", dict(zip(JOINT_NAMES, targets, strict=True)), normalize=False)
             if hold["pose"] == "dance" and hold["stage"] == "home":
+                hold["stage"] = "entry"
+                hold["target"] = DANCE_CENTER
+                hold["start_positions"] = positions
+                hold["progress_position"] = positions.copy()
+                hold["progress_time"] = {name: now for name in JOINT_NAMES}
+                hold["trim_pending"] = set()
+                hold["next"] = now + POSE_STEP_SECONDS
+                hold["expires"] = now + 60
+                return
+            if hold["pose"] == "dance" and hold["stage"] == "entry":
                 hold["stage"] = "playback"
                 hold["bounds"] = self.bounds
                 hold["frame_index"] = 0
-                hold["last_goals"] = dict(zip(JOINT_NAMES, HOME, strict=True))
+                hold["last_goals"] = dict(zip(JOINT_NAMES, DANCE_CENTER, strict=True))
                 hold["temperatures"] = {name: snapshot[name]["temperature"] for name in JOINT_NAMES}
                 hold["temperature_at"] = now
                 hold["progress"] = .05
@@ -569,6 +578,8 @@ class Arm:
                     hold["trim_pending"].remove(name)
                 else:
                     goal = targets[index] + direction * HOME_TRIM_OFFSET
+                    if name == "elbow_flex":
+                        goal = min(goal, self.home[index])
                     hold["trim_pending"].add(name)
             else:
                 hold["trim_pending"].discard(name)
@@ -631,7 +642,8 @@ class Arm:
         hold["next"] = now + 1 / DANCE_FPS
         if hold["frame_index"] == len(hold["dance_frames"]):
             hold["stage"] = "finish"
-            hold["target"] = HOME
+            hold["target"] = self.home
+            hold["bounds"] = self._fold_envelope(self.bounds)
             hold["start_positions"] = positions
             hold["progress_position"] = positions.copy()
             hold["progress_time"] = {name: now for name in JOINT_NAMES}

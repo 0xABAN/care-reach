@@ -8,7 +8,7 @@ import home
 
 class FakeBus:
     def __init__(self, _port, motors):
-        self.positions = dict(zip(motors, (2004, 1770, 2215, 2024, 2001, 1997)))
+        self.positions = dict(zip(motors, (2004, 1170, 3005, 2124, 401, 1997)))
         self.registers = {
             "Min_Position_Limit": {name: 0 for name in motors},
             "Max_Position_Limit": {name: 4095 for name in motors},
@@ -53,7 +53,9 @@ class HomeTests(unittest.TestCase):
         with patch.object(home, "SerialMotorsBus", factory), patch.object(home.time, "sleep") as sleep:
             home.main(["--speed", "4", "--port", "unused"])
         bus = created[0]
-        self.assertTrue(all(abs(value - 2000) <= home.TOLERANCE for value in bus.positions.values()))
+        self.assertTrue(all(abs(bus.positions[name] - home.HOME[index]) <= home.TOLERANCE
+                            for index, name in enumerate(home.NAMES)))
+        self.assertLessEqual(bus.positions["elbow_flex"], home.HOME[2])
         self.assertTrue(all(value == 4 for value in bus.registers["Goal_Speed"].values()))
         self.assertTrue(all(value == 1 for value in bus.registers["Torque_Enable"].values()))
         self.assertEqual(bus.disconnected_with, False)
