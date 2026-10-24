@@ -152,19 +152,89 @@
       }
     }
 
-    function syncCameraStreams() {
-      const visible = !cameraPanel.hidden && !document.hidden;
-      for (const [feed, path, errorId] of [
-        [cameraFeed, '/camera/stream', 'camera-error'],
-        [camera2Feed, '/camera2/stream', 'camera2-error']
-      ]) {
-        if (visible) {
-          if (!feed.hasAttribute('src')) {
-            document.getElementById(errorId).hidden = true;
-            feed.src = path;
-          }
-        } else feed.removeAttribute('src');
+    const CAMERA_MIN_INTERVAL_MS = 200; // 5 fps cap per camera; slow responses push the next poll later instead of queueing
+    const CAMERA_RETRY_BASE_MS = 500;
+    const CAMERA_RETRY_MAX_MS = 4000;
+    const cameraPolls = [
+      { feed: cameraFeed, path: '/camera/snapshot', errorId: 'camera-error' },
+      { feed: camera2Feed, path: '/camera2/snapshot', errorId: 'camera2-error' },
+    ].map(spec => ({
+      ...spec,
+      errorBox: document.getElementById(spec.errorId),
+      url: null,      // object URL of the frame currently shown
+      timer: null,    // pending setTimeout
+      request: null,  // in-flight AbortController
+      running: false,
+      generation: 0,  // bumped on every start/stop to invalidate stale responses
+      delayMs: CAMERA_RETRY_BASE_MS,
+    }));
+
+    function cameraVisible() {
+      return !cameraPanel.hidden && !document.hidden;
+    }
+
+    async function pollSnapshot(camera, generation) {
+      const started = Date.now();
+      const request = new AbortController();
+      camera.request = request;
+      let replaced = false;
+      try {
+        const response = await fetch(camera.path, {cache: 'no-store', signal: request.signal});
+        if (!response.ok) throw new Error(`Camera answered ${response.status}`);
+        const blob = await response.blob();
+        if (generation !== camera.generation || !cameraVisible()) return;
+        const url = URL.createObjectURL(blob);
+        try {
+          await new Promise((resolve, reject) => {
+            const probe = new Image();
+            probe.onload = () => { probe.onload = probe.onerror = null; resolve(); };
+            probe.onerror = () => { probe.onload = probe.onerror = null; reject(new Error('Corrupt JPEG')); };
+            probe.src = url;
+          });
+        } catch (error) {
+          URL.revokeObjectURL(url);
+          throw error;
+        }
+        if (generation !== camera.generation || !cameraVisible()) { URL.revokeObjectURL(url); return; }
+        const previous = camera.url;
+        camera.feed.src = url;
+        camera.url = url;
+        if (previous) URL.revokeObjectURL(previous);
+        camera.errorBox.hidden = true;
+        replaced = true;
+      } catch (error) {
+        if (generation !== camera.generation) return;
+        if (error.name !== 'AbortError') camera.errorBox.hidden = false;
+      } finally {
+        if (camera.request === request) camera.request = null;
+        if (generation !== camera.generation || !camera.running || !cameraVisible()) return;
+        camera.delayMs = replaced ? CAMERA_RETRY_BASE_MS : Math.min(camera.delayMs * 2, CAMERA_RETRY_MAX_MS);
+        const elapsed = Date.now() - started;
+        const delay = replaced ? Math.max(0, CAMERA_MIN_INTERVAL_MS - elapsed) : camera.delayMs;
+        camera.timer = setTimeout(() => pollSnapshot(camera, generation), delay);
       }
+    }
+
+    function stopCameraPolls() {
+      for (const camera of cameraPolls) {
+        if (!camera.running) continue;
+        camera.running = false;
+        camera.generation += 1;
+        if (camera.timer) { clearTimeout(camera.timer); camera.timer = null; }
+        if (camera.request) { camera.request.abort(); camera.request = null; }
+      }
+    }
+
+    function syncCameraPolls() {
+      if (cameraVisible()) {
+        for (const camera of cameraPolls) {
+          if (camera.running) continue;
+          camera.running = true;
+          camera.generation += 1;
+          camera.delayMs = CAMERA_RETRY_BASE_MS;
+          pollSnapshot(camera, camera.generation);
+        }
+      } else stopCameraPolls();
     }
 
     function showTab(name) {
@@ -174,7 +244,7 @@
       cameraPanel.hidden = !camera;
       document.getElementById('tab-controls').setAttribute('aria-selected', String(!camera));
       document.getElementById('tab-camera').setAttribute('aria-selected', String(camera));
-      syncCameraStreams();
+      syncCameraPolls();
       if (camera) refreshRange();
       else if (rangeRequest) rangeRequest.abort();
     }
@@ -398,9 +468,17 @@
     document.addEventListener('visibilitychange', () => {
       if (document.hidden) { endPress(); if (rangeRequest) rangeRequest.abort(); }
       else refreshRange();
-      syncCameraStreams();
+      syncCameraPolls();
     });
-    window.addEventListener('pagehide', endPress);
+    window.addEventListener('pagehide', (event) => {
+      endPress();
+      stopCameraPolls();
+      if (event.persisted) return; // bfcache restore keeps the shown frame; object URLs survive it
+      for (const camera of cameraPolls) {
+        if (camera.url) { URL.revokeObjectURL(camera.url); camera.url = null; }
+      }
+    });
+    window.addEventListener('pageshow', () => syncCameraPolls());
     refresh(); setInterval(refresh, 1000);
     refreshTranscription(); setInterval(refreshTranscription, 2000);
     setInterval(refreshRange, 200);

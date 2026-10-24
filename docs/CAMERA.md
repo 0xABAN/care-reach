@@ -20,6 +20,13 @@ from a computer that can reach the Pi. The same tab works through the
 [dashboard's Tailscale SSH tunnel](http://127.0.0.1:8765/) on this Mac. The
 camera is available to everyone with dashboard access.
 
+The dashboard tab shows a low-latency latest-frame feed instead of the MJPEG
+stream: it polls `/camera/snapshot` (and `/camera2/snapshot` for the second
+camera) at most once per camera in flight and at most ~5 fps, keeps the last
+frame on screen until a replacement arrives, and pauses while the tab or page
+is hidden. This avoids queueing stale 30 fps frames over slow tunnels. The
+`/camera/stream` endpoints remain available for direct MJPEG clients.
+
 For a separate camera-only view on a Mac that can SSH to the Pi over Tailscale:
 
 ```bash

@@ -6,7 +6,7 @@ StartLimitIntervalSec=0
 [Service]
 Type=simple
 ExecStartPre=/usr/bin/test -e /dev/v4l/by-id/usb-Sonix_Technology_Co.__Ltd._w200_SN0001-video-index0
-ExecStart=/usr/bin/ustreamer --device /dev/v4l/by-id/usb-Sonix_Technology_Co.__Ltd._w200_SN0001-video-index0 --format MJPEG --resolution 640x480 --desired-fps 30 --host 127.0.0.1 --port 8768 --slowdown
+ExecStart=/usr/bin/ustreamer --device /dev/v4l/by-id/usb-Sonix_Technology_Co.__Ltd._w200_SN0001-video-index0 --format MJPEG --resolution 640x480 --desired-fps 30 --host 127.0.0.1 --port 8768
 Restart=always
 RestartSec=2
 

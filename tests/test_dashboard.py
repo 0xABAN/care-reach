@@ -1,13 +1,16 @@
 """Fake-bus dashboard checks. These tests never open a serial device."""
 
+import http.client
 import io
 import json
 import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
+from http.server import ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
@@ -763,17 +766,25 @@ class HttpHostTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn("motors", state)
 
-    def test_camera_tab_and_same_origin_stream(self):
+    def test_camera_tab_uses_latest_frame_snapshots_and_stream_stays_available(self):
         page = (Path(__file__).resolve().parents[1] / "static" / "index.html").read_text()
         self.assertIn('id="tab-camera"', page)
         self.assertIn('id="camera-panel"', page)
-        self.assertIn("'/camera/stream'", page)
+        self.assertIn("'/camera/snapshot'", page)
         self.assertIn('id="camera2-feed"', page)
-        self.assertIn("'/camera2/stream'", page)
+        self.assertIn("'/camera2/snapshot'", page)
         self.assertIn('id="range-card"', page)
+        self.assertIn("CAMERA_MIN_INTERVAL_MS", page)
+        self.assertIn("pollSnapshot", page)
+        self.assertIn("cache: 'no-store'", page)
+        self.assertNotIn("'/camera/stream'", page)
+        self.assertNotIn("'/camera2/stream'", page)
 
         class FakeCamera(io.BytesIO):
             headers = {"Content-Type": "multipart/x-mixed-replace;boundary=frame"}
+
+            def read1(self, size=-1):
+                return self.read(size)
 
         with patch("server.urlopen", return_value=FakeCamera(b"--frame\r\nJPEG\r\n")) as open_camera:
             status, (headers, body) = self.call(
@@ -782,12 +793,16 @@ class HttpHostTests(unittest.TestCase):
             )
         self.assertEqual(status, 200)
         self.assertIn(b"multipart/x-mixed-replace;boundary=frame", headers)
+        self.assertIn(b"Connection: close", headers)
         self.assertEqual(body, b"--frame\r\nJPEG\r\n")
         open_camera.assert_called_once_with("http://127.0.0.1:8766/stream", timeout=5)
 
     def test_second_camera_stream_and_snapshot_use_separate_service(self):
         class FakeCamera(io.BytesIO):
             headers = {"Content-Type": "image/jpeg", "Content-Length": "4"}
+
+            def read1(self, size=-1):
+                return self.read(size)
 
         for suffix in ("stream", "snapshot"):
             with self.subTest(suffix=suffix), patch(
@@ -809,6 +824,21 @@ class HttpHostTests(unittest.TestCase):
                 self.handler, {"Host": "pi.local:8765"}, path="/camera2/stream"
             )
         self.assertEqual((status, payload), (503, {"error": "Camera unavailable"}))
+
+    def test_snapshot_content_length_is_computed_when_upstream_omits_it(self):
+        class HeaderlessCamera(io.BytesIO):
+            headers = {"Content-Type": "image/jpeg"}
+
+        with patch("server.urlopen", return_value=HeaderlessCamera(b"jpeg-body")) as open_camera:
+            status, (headers, body) = self.call(
+                self.handler, {"Host": "pi.local:8765"},
+                path="/camera/snapshot", parse_json=False,
+            )
+        self.assertEqual(status, 200)
+        self.assertIn(b"Content-Length: 9", headers)
+        self.assertNotIn(b"Connection: close", headers)
+        self.assertEqual(body, b"jpeg-body")
+        open_camera.assert_called_once_with("http://127.0.0.1:8766/snapshot", timeout=5)
 
     def test_camera_unavailable_returns_503(self):
         with patch("server.urlopen", side_effect=OSError("camera offline")):
@@ -958,6 +988,121 @@ class HttpHostTests(unittest.TestCase):
         )
         self.assertEqual(status, 404)
         self.assertEqual(payload, {"error": "Not found"})
+
+
+class HttpKeepAliveTests(unittest.TestCase):
+    """Real-socket checks: HTTP/1.1 keep-alive reuses one connection for
+    finite responses, and stream framing stays accurate and close-delimited."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        ranges = [(1096, 2617), (883, 3243), (861, 3007), (843, 3130), (0, 4095), (1317, 2762)]
+        calibration = {
+            name: {"range_min": lo, "range_max": hi}
+            for name, (lo, hi) in zip(JOINT_NAMES, ranges, strict=True)
+        }
+        settings = {
+            str(index): {"lower": lo, "upper": hi, "scale": 1}
+            for index, (lo, hi) in enumerate(
+                ((1116, 2597), (903, 3223), (881, 2987), (863, 3110), (None, None), (1317, 2742)), 1
+            )
+        }
+        pose = {"robot_id": "care_reach_follower",
+                "positions_ticks": dict(zip(JOINT_NAMES, (2040, 893, 3064, 2888, 2416, 1470), strict=True))}
+        settings_path = root / "joint_settings.json"
+        calibration_path = root / "calibration.json"
+        pose_path = root / "folded_pose.json"
+        settings_path.write_text(json.dumps(settings), encoding="utf-8")
+        calibration_path.write_text(json.dumps(calibration), encoding="utf-8")
+        pose_path.write_text(json.dumps(pose), encoding="utf-8")
+        self.arm = Arm("fake", bus_factory=lambda _: FakeBus((2000,) * 6),
+                       settings_path=settings_path, calibration_path=calibration_path,
+                       pose_path=pose_path, telemetry_path=root / "telemetry.jsonl")
+        self.addCleanup(self.arm.close)
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), handler_for(self.arm, 0))
+        self.server.RequestHandlerClass = handler_for(self.arm, self.server.server_address[1])
+        self.server.daemon_threads = True
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.addCleanup(self.server.shutdown)
+        self.addCleanup(self.server.server_close)
+
+    def connect(self):
+        connection = http.client.HTTPConnection(
+            "127.0.0.1", self.server.server_address[1], timeout=5
+        )
+        self.addCleanup(connection.close)
+        return connection
+
+    def test_keepalive_serves_consecutive_api_and_snapshot_requests(self):
+        connection = self.connect()
+        connection.request("GET", "/api/state")
+        response = connection.getresponse()
+        state = json.loads(response.read())
+        self.assertEqual(response.status, 200)
+        self.assertIn("motors", state)
+        self.assertIsNone(response.getheader("Connection"))
+        shared_socket = connection.sock
+
+        payload = b"fresh-jpeg-bytes"
+
+        class SnapshotCamera(io.BytesIO):
+            headers = {"Content-Type": "image/jpeg"}  # deliberately no Content-Length
+
+        with patch("server.urlopen", return_value=SnapshotCamera(payload)):
+            connection.request("GET", "/camera/snapshot")
+            response = connection.getresponse()
+            body = response.read()
+        self.assertEqual(response.status, 200)
+        self.assertEqual(body, payload)
+        self.assertEqual(response.getheader("Content-Length"), str(len(payload)))
+        self.assertIs(connection.sock, shared_socket)
+
+        connection.request("GET", "/api/state")
+        response = connection.getresponse()
+        response.read()
+        self.assertEqual(response.status, 200)
+        self.assertIs(connection.sock, shared_socket)
+
+    def test_stream_is_close_delimited_and_relays_prompt_chunks(self):
+        class FramedCamera:
+            """Only offers read1: read(n) head-of-line buffering must not be used."""
+
+            headers = {"Content-Type": "multipart/x-mixed-replace;boundary=frame"}
+
+            def __init__(self, frames):
+                self.frames = iter(frames)
+                self.sizes = []
+
+            def read1(self, size=-1):
+                self.sizes.append(size)
+                return next(self.frames, b"")
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return None
+
+        frames = [b"--frame\r\n", b"AA", b"\r\n--frame\r\n", b"BBB", b"\r\n"]
+        upstream = FramedCamera(frames)
+        connection = self.connect()
+        with patch("server.urlopen", return_value=upstream):
+            connection.request("GET", "/camera/stream")
+            response = connection.getresponse()
+            body = response.read()
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.getheader("Connection"), "close")
+        self.assertTrue(response.will_close)
+        self.assertEqual(body, b"".join(frames))
+        self.assertEqual(upstream.sizes, [16 * 1024] * (len(frames) + 1))
 
 
 class StaticUiTests(unittest.TestCase):

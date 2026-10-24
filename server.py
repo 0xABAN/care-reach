@@ -969,6 +969,10 @@ def ultrasonic_state():
 
 def handler_for(arm, port):
     class Handler(BaseHTTPRequestHandler):
+        # Keep-alive: every finite route below sends an exact Content-Length,
+        # and the unbounded MJPEG streams explicitly close the connection.
+        protocol_version = "HTTP/1.1"
+
         def reply(self, code, data):
             body = json.dumps(data).encode()
             self.send_response(code)
@@ -1018,19 +1022,32 @@ def handler_for(arm, port):
                     self.reply(503, {"error": "Camera unavailable"})
                     return
                 with upstream:
-                    self.send_response(200)
-                    self.send_header("Content-Type", upstream.headers.get("Content-Type", "image/jpeg"))
-                    self.send_header("Cache-Control", "no-store")
                     if upstream_path == "/snapshot":
-                        length = upstream.headers.get("Content-Length")
-                        if length:
-                            self.send_header("Content-Length", length)
-                    self.end_headers()
-                    try:
-                        while chunk := upstream.read(16 * 1024):
-                            self.wfile.write(chunk)
-                    except (BrokenPipeError, ConnectionResetError, TimeoutError):
-                        pass  # Viewer closed the tab or disconnected.
+                        # A snapshot is one finite JPEG: buffer it so the
+                        # response always carries an accurate Content-Length,
+                        # which HTTP/1.1 keep-alive needs even when the
+                        # upstream omits it.
+                        body = upstream.read()
+                        self.send_response(200)
+                        self.send_header("Content-Type", upstream.headers.get("Content-Type", "image/jpeg"))
+                        self.send_header("Cache-Control", "no-store")
+                        self.send_header("Content-Length", str(len(body)))
+                        self.end_headers()
+                        self.wfile.write(body)
+                    else:
+                        # The MJPEG stream is unbounded and close-delimited,
+                        # so this response cannot be reused by another request.
+                        self.send_response(200)
+                        self.send_header("Content-Type", upstream.headers.get("Content-Type", "image/jpeg"))
+                        self.send_header("Cache-Control", "no-store")
+                        self.send_header("Connection", "close")
+                        self.close_connection = True
+                        self.end_headers()
+                        try:
+                            while chunk := upstream.read1(16 * 1024):
+                                self.wfile.write(chunk)
+                        except (BrokenPipeError, ConnectionResetError, TimeoutError):
+                            pass  # Viewer closed the tab or disconnected.
             elif path == "/":
                 body = (ROOT / "static" / "index.html").read_bytes()
                 self.send_response(200)
