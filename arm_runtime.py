@@ -7,6 +7,7 @@ pose where possible and leaves torque enabled.
 
 from __future__ import annotations
 
+import subprocess
 import time
 import math
 from collections.abc import Iterable
@@ -35,6 +36,22 @@ DEFAULT_COMMAND_ACCELERATION = (120.0, 120.0, 120.0, 120.0, 180.0, 120.0)  # tic
 
 class ArmSafetyError(RuntimeError):
     """A preflight or live safety guard stopped playback."""
+
+
+# The URT-2's stable device path on the robot Pi.
+URT2_PORT = "/dev/serial/by-id/usb-1a86_USB_Single_Serial_5B79078563-if00"
+
+
+def require_free_port(port: str) -> None:
+    """Fail closed if a different process, such as the dashboard, owns the serial device."""
+    try:
+        result = subprocess.run(["fuser", "-s", port], check=False, capture_output=True)
+    except OSError as exc:
+        raise ArmSafetyError("cannot verify sole URT-2 ownership (fuser unavailable)") from exc
+    if result.returncode == 0:
+        raise ArmSafetyError("URT-2 is already owned; stop its current controller first")
+    if result.returncode != 1:
+        raise ArmSafetyError(f"cannot verify sole URT-2 ownership (fuser exit {result.returncode})")
 
 
 def _real_bus(port: str):

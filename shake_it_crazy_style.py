@@ -9,11 +9,11 @@ from __future__ import annotations
 
 import argparse
 import math
-import subprocess
 import time
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
+from arm_runtime import URT2_PORT as PORT, require_free_port
 from motion_core import JOINT_NAMES, SafetyBounds, validate_pose
 from park import HOME
 
@@ -32,8 +32,6 @@ MIN_VOLTAGE_RAW = 48
 TRIAL_GOAL_SPEED = 20
 TRIAL_ACCELERATION = 10
 TELEMETRY_PERIOD_S = 0.5
-PORT = "/dev/serial/by-id/usb-1a86_USB_Single_Serial_5B79078563-if00"
-
 
 
 class ShakeSafetyError(RuntimeError):
@@ -47,18 +45,6 @@ def waveform(elapsed_s: float) -> int:
     ramp = min(1.0, elapsed_s / RAMP_S, (DURATION_S - elapsed_s) / RAMP_S)
     envelope = ramp * ramp * (3 - 2 * ramp)
     return round(AMPLITUDE_TICKS * envelope * math.sin(2 * math.pi * FREQUENCY_HZ * elapsed_s))
-
-
-def require_free_port(port: str) -> None:
-    """Fail closed if a different process owns the serial device."""
-    try:
-        result = subprocess.run(["fuser", "-s", port], check=False, capture_output=True)
-    except OSError as exc:
-        raise ShakeSafetyError("cannot verify sole URT-2 ownership (fuser unavailable)") from exc
-    if result.returncode == 0:
-        raise ShakeSafetyError("URT-2 is already owned; stop its current controller first")
-    if result.returncode != 1:
-        raise ShakeSafetyError(f"cannot verify sole URT-2 ownership (fuser exit {result.returncode})")
 
 
 class WristShake:
