@@ -11,8 +11,9 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-import dance_demo
-from motion_core import JOINT_NAMES, SafetyBounds, validate_pose
+from care_reach.motion.bounds import SafetyBounds, validate_pose
+from care_reach.robot import JOINT_NAMES
+from care_reach.routines import dance
 
 
 class DanceDemoTests(unittest.TestCase):
@@ -29,9 +30,9 @@ class DanceDemoTests(unittest.TestCase):
         )
 
     def test_data_inspired_phases_include_counterrotation_and_gripper_beats(self) -> None:
-        waypoints = dance_demo.build_waypoints(1.0)
-        self.assertEqual(len(waypoints), len(dance_demo.PHASE_VMAX))
-        self.assertEqual(waypoints[-1][1], dance_demo.HOME)
+        waypoints = dance.build_waypoints(1.0)
+        self.assertEqual(len(waypoints), len(dance.PHASE_VMAX))
+        self.assertEqual(waypoints[-1][1], dance.HOME)
         # The first broad arm arc counter-rotates loaded lift and elbow.
         self.assertGreater(waypoints[0][1][1] - 2000, 0)
         self.assertLess(waypoints[0][1][2] - 2000, 0)
@@ -40,14 +41,14 @@ class DanceDemoTests(unittest.TestCase):
             before, after = waypoints[index - 1][1], waypoints[index][1]
             self.assertEqual(before[:5], after[:5])
             self.assertNotEqual(before[5], after[5])
-        self.assertGreater(max(row[4] for row in dance_demo.PHASE_VMAX),
-                           min(row[4] for row in dance_demo.PHASE_VMAX))
+        self.assertGreater(max(row[4] for row in dance.PHASE_VMAX),
+                           min(row[4] for row in dance.PHASE_VMAX))
 
     def test_full_scale_path_is_bounded_and_home_to_home(self) -> None:
         bounds = SafetyBounds.from_files(self.settings, self.calibration)
-        waypoints, frames = dance_demo.build_plan(bounds, 1.0)
-        self.assertEqual(frames[0], dance_demo.HOME)
-        self.assertEqual(frames[-1], dance_demo.HOME)
+        waypoints, frames = dance.build_plan(bounds, 1.0)
+        self.assertEqual(frames[0], dance.HOME)
+        self.assertEqual(frames[-1], dance.HOME)
         self.assertGreater(len(frames), len(waypoints))
         self.assertGreater(max(frame[4] for frame in frames) - min(frame[4] for frame in frames), 750)
         for pose in frames:
@@ -57,8 +58,8 @@ class DanceDemoTests(unittest.TestCase):
 
     def test_planned_speed_stays_within_phase_envelope(self) -> None:
         bounds = SafetyBounds.from_files(self.settings, self.calibration)
-        _, frames = dance_demo.build_plan(bounds, 1.0, fps=20)
-        ceiling = tuple(max(row[j] for row in dance_demo.PHASE_VMAX) for j in range(6))
+        _, frames = dance.build_plan(bounds, 1.0, fps=20)
+        ceiling = tuple(max(row[j] for row in dance.PHASE_VMAX) for j in range(6))
         for before, after in zip(frames, frames[1:]):
             for joint in range(6):
                 # One tick accounts for frame quantization.
@@ -69,9 +70,9 @@ class DanceDemoTests(unittest.TestCase):
         output = io.StringIO()
         # If a future change imports the runtime on the offline path, this
         # missing-module sentinel exposes it without attaching any hardware.
-        with patch.dict(sys.modules, {"arm_runtime": None}):
+        with patch.dict(sys.modules, {"care_reach.hardware.arm_runtime": None}):
             with contextlib.redirect_stdout(output):
-                result = dance_demo.main(
+                result = dance.main(
                     ["--settings", str(self.settings), "--calibration", str(self.calibration)]
                 )
         self.assertEqual(result, 0)
@@ -81,13 +82,13 @@ class DanceDemoTests(unittest.TestCase):
         bounds = SafetyBounds.from_files(self.settings, self.calibration)
         for invalid in (0, -0.1, 1.01, float("nan")):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
-                dance_demo.build_plan(bounds, invalid)
+                dance.build_plan(bounds, invalid)
         tight = Path(self.temp.name) / "tight.json"
         tight.write_text(
             json.dumps({str(i): {"lower": 1990, "upper": 2010} for i in range(1, 7)})
         )
         with self.assertRaises(ValueError):
-            dance_demo.build_plan(SafetyBounds.from_files(tight, self.calibration), 0.5)
+            dance.build_plan(SafetyBounds.from_files(tight, self.calibration), 0.5)
 
 
 if __name__ == "__main__":

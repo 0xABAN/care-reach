@@ -7,7 +7,7 @@ Type=simple
 WorkingDirectory=/home/robot/worktrees/care-reach/pi-runtime
 Environment=PYTHONPATH=/home/robot/worktrees/care-reach/lerobot-runtime-src:/home/robot/worktrees/care-reach/lerobot-runtime-src/src
 ExecStartPre=/usr/bin/test -e /dev/serial/by-id/usb-1a86_USB_Single_Serial_5B79078563-if00
-ExecStart=/home/robot/worktrees/care-reach/pi-runtime/.venv/bin/python -u /home/robot/worktrees/care-reach/pi-runtime/server.py --port /dev/serial/by-id/usb-1a86_USB_Single_Serial_5B79078563-if00 --http-port 8765
+ExecStart=/home/robot/worktrees/care-reach/pi-runtime/.venv/bin/python -u -m care_reach.dashboard.server --port /dev/serial/by-id/usb-1a86_USB_Single_Serial_5B79078563-if00 --http-port 8765
 Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=15s

@@ -10,8 +10,9 @@ from __future__ import annotations
 import time
 from typing import Any, Callable
 
-from arm_runtime import _real_bus
-from motion_core import JOINT_NAMES, SafetyBounds, validate_pose
+from care_reach.hardware.arm_runtime import _real_bus
+from care_reach.motion.bounds import SafetyBounds, validate_pose
+from care_reach.robot import JOINT_NAMES
 
 
 class PoseMoveError(RuntimeError):

@@ -8,7 +8,7 @@ The tested Pi environment uses LeRobot 0.6.2 source at upstream commit `d3793b7e
 
 For a clean reconstruction, fetch the pinned upstream source, apply the tracked patch to that source, then copy its `src/lerobot` directory into `~/worktrees/care-reach/lerobot-runtime-src/lerobot`. `git apply --check config/lerobot_motor_only_utils.patch` passes against that upstream commit. Keep the original source and patch provenance; do not copy a macOS virtual environment to the Pi. The tested Pi virtual environment is `~/worktrees/care-reach/pi-runtime/.venv` with `draccus==0.11.6`, `numpy==2.5.4`, `pyserial==3.5`, and `rustypot==1.13.1` plus their dependencies.
 
-The active LeRobot calibration file is `~/.cache/huggingface/lerobot/calibration/robots/so_follower/care_reach_follower.json`. Restore it from [`config/care_reach_follower.json`](../config/care_reach_follower.json) only when the Pi copy is missing or intentionally being reset. The tracked [`joint_settings.json`](../joint_settings.json) and [`folded_pose.json`](../folded_pose.json) belong in the checkout root.
+The active LeRobot calibration file is `~/.cache/huggingface/lerobot/calibration/robots/so_follower/care_reach_follower.json`. Restore it from [`config/care_reach_follower.json`](../config/care_reach_follower.json) only when the Pi copy is missing or intentionally being reset. The tracked [`config/joint_settings.json`](../config/joint_settings.json) and [`config/folded_pose.json`](../config/folded_pose.json) stay in the checkout's `config/` directory.
 
 ## Dashboard service
 

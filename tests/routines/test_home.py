@@ -3,7 +3,7 @@
 import unittest
 from unittest.mock import patch
 
-import home
+from care_reach.routines import home
 
 
 class FakeBus:

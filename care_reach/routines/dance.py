@@ -13,7 +13,9 @@ import math
 from pathlib import Path
 from typing import Sequence
 
-from motion_core import JOINT_NAMES, SafetyBounds, plan_blended_waypoints
+from care_reach.motion.bounds import SafetyBounds
+from care_reach.motion.trajectory import plan_blended_waypoints
+from care_reach.robot import JOINT_NAMES, JOINT_SETTINGS_PATH
 
 
 HOME = (2000,) * 6
@@ -102,7 +104,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--scale", type=float, default=0.75)
     parser.add_argument("--fps", type=int, default=20)
     parser.add_argument("--port", default="/dev/cu.usbmodem5B790785631")
-    parser.add_argument("--settings", type=Path, default=Path(__file__).with_name("joint_settings.json"))
+    parser.add_argument("--settings", type=Path, default=JOINT_SETTINGS_PATH)
     parser.add_argument("--calibration", type=Path, default=None)
     parser.add_argument("--csv", type=Path, help="save planned target positions")
     args = parser.parse_args(argv)
@@ -124,7 +126,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     # Runtime import and bus construction must remain below complete preflight.
-    from arm_runtime import ArmRuntime
+    from care_reach.hardware.arm_runtime import ArmRuntime
 
     with ArmRuntime(args.port, bounds) as runtime:
         result = runtime.run(frames, fps=args.fps)

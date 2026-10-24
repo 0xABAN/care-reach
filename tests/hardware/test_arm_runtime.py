@@ -2,8 +2,9 @@
 
 import unittest
 
-from arm_runtime import ArmRuntime, ArmSafetyError
-from motion_core import JOINT_NAMES, SafetyBounds, UnsafePoseError
+from care_reach.hardware.arm_runtime import ArmRuntime, ArmSafetyError
+from care_reach.motion.bounds import SafetyBounds, UnsafePoseError
+from care_reach.robot import JOINT_NAMES
 
 
 BOUNDS = SafetyBounds((1500, 1500, 1500, 1500, 1500, 1340), (2500, 2500, 2500, 2500, 2500, 2742))

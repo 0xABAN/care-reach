@@ -14,11 +14,12 @@ import json
 from pathlib import Path
 from typing import Sequence
 
-from motion_core import JOINT_NAMES, SafetyBounds, UnsafePoseError, plan_blended_waypoints
+from care_reach.motion.bounds import SafetyBounds, UnsafePoseError
+from care_reach.motion.trajectory import plan_blended_waypoints
+from care_reach.robot import CALIBRATION_PATH, FOLDED_POSE_PATH, JOINT_NAMES, JOINT_SETTINGS_PATH
 
 
 HOME = (2000,) * 6
-POSE_PATH = Path(__file__).with_name("folded_pose.json")
 FOLD_VMAX = (150.0, 170.0, 170.0, 170.0, 200.0, 150.0)
 FOLD_AMAX = (240.0, 250.0, 250.0, 250.0, 300.0, 240.0)
 # The measured fold is 10 ticks below motor 2's old panel bound and 77 above
@@ -26,7 +27,7 @@ FOLD_AMAX = (240.0, 250.0, 250.0, 250.0, 300.0, 240.0)
 MAX_RECORDED_EXTENSION = (0, 20, 100, 0, 0, 0)
 
 
-def folded_target(pose_path: str | Path = POSE_PATH) -> tuple[int, ...]:
+def folded_target(pose_path: str | Path = FOLDED_POSE_PATH) -> tuple[int, ...]:
     """Read the six exact encoder ticks of Lance's physical folded pose."""
     with Path(pose_path).open(encoding="utf-8") as stream:
         record = json.load(stream)
@@ -67,7 +68,7 @@ def folded_bounds(bounds: SafetyBounds, target: Sequence[int]) -> SafetyBounds:
 
 def build_plan(
     bounds: SafetyBounds,
-    pose_path: str | Path = POSE_PATH,
+    pose_path: str | Path = FOLDED_POSE_PATH,
     fps: int = 20,
 ) -> tuple[tuple[int, ...], SafetyBounds, list[tuple[int, ...]]]:
     """Plan Home to the recorded fold; return the target, fold bounds, and frames.
@@ -98,9 +99,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     mode.add_argument("--execute", action="store_true", help="move the connected arm")
     parser.add_argument("--fps", type=int, default=20)
     parser.add_argument("--port", default="/dev/cu.usbmodem5B790785631")
-    parser.add_argument("--settings", type=Path, default=Path(__file__).with_name("joint_settings.json"))
-    parser.add_argument("--calibration", type=Path, default=Path.home() / ".cache/huggingface/lerobot/calibration/robots/so_follower/care_reach_follower.json")
-    parser.add_argument("--pose", type=Path, default=POSE_PATH, help="recorded folded pose JSON")
+    parser.add_argument("--settings", type=Path, default=JOINT_SETTINGS_PATH)
+    parser.add_argument("--calibration", type=Path, default=CALIBRATION_PATH)
+    parser.add_argument("--pose", type=Path, default=FOLDED_POSE_PATH, help="recorded folded pose JSON")
     parser.add_argument("--csv", type=Path, help="save planned target ticks")
     args = parser.parse_args(argv)
 
@@ -118,7 +119,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("dry run complete; no servo bus opened")
         return 0
 
-    from measured_pose_runner import MeasuredPoseRunner
+    from care_reach.hardware.measured_pose_runner import MeasuredPoseRunner
 
     result = MeasuredPoseRunner(args.port, task_bounds).move(
         target, max_lead=80, period_s=0.06, timeout_s=35, tolerance=35

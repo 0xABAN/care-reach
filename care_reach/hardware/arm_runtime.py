@@ -12,7 +12,8 @@ import math
 from collections.abc import Iterable
 from typing import Any
 
-from motion_core import JOINT_NAMES, SafetyBounds, UnsafePoseError, validate_pose
+from care_reach.motion.bounds import SafetyBounds, UnsafePoseError, validate_pose
+from care_reach.robot import JOINT_NAMES
 
 
 HOME = 2000

@@ -2,8 +2,9 @@
 
 import unittest
 
-from measured_pose_runner import MeasuredPoseRunner, PoseMoveError
-from motion_core import JOINT_NAMES, SafetyBounds, UnsafePoseError
+from care_reach.hardware.measured_pose_runner import MeasuredPoseRunner, PoseMoveError
+from care_reach.motion.bounds import SafetyBounds, UnsafePoseError
+from care_reach.robot import JOINT_NAMES
 
 
 BOUNDS = SafetyBounds((1000, 800, 800, 800, 0, 1340), (2600, 3200, 3100, 3110, 3300, 2742))

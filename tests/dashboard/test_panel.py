@@ -7,8 +7,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from motion_core import JOINT_NAMES
-from server import Arm
+from care_reach.dashboard.panel import PanelController
+from care_reach.robot import JOINT_NAMES
 
 
 class FakeBus:
@@ -86,10 +86,10 @@ class DashboardTests(unittest.TestCase):
         self.pose_path.write_text(json.dumps(pose), encoding="utf-8")
 
     def arm(self, bus):
-        thread_patch = patch("server.threading.Thread")
+        thread_patch = patch("care_reach.dashboard.panel.threading.Thread")
         thread_patch.start()
         self.addCleanup(thread_patch.stop)
-        arm = Arm("fake", bus_factory=lambda _: bus, settings_path=self.settings_path,
+        arm = PanelController("fake", bus_factory=lambda _: bus, settings_path=self.settings_path,
                   calibration_path=self.calibration_path, pose_path=self.pose_path)
         self.addCleanup(arm.close)
         return arm

@@ -8,8 +8,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from motion_core import JOINT_NAMES, SafetyBounds, UnsafePoseError, validate_pose
-from park import FOLD_VMAX, HOME, build_plan, folded_bounds, folded_target, main
+from care_reach.motion.bounds import SafetyBounds, UnsafePoseError, validate_pose
+from care_reach.robot import JOINT_NAMES
+from care_reach.routines.park import FOLD_VMAX, HOME, build_plan, folded_bounds, folded_target, main
 
 
 class ParkTests(unittest.TestCase):
@@ -72,7 +73,7 @@ class ParkTests(unittest.TestCase):
         restricted = SafetyBounds((1500, 1500, 1500, 1500, 1500, 1340), (2500, 2500, 2500, 2500, 2500, 2742))
         with self.assertRaisesRegex(UnsafePoseError, "motor 2"):
             build_plan(restricted, self.pose_path)
-        with patch.dict(sys.modules, {"arm_runtime": None}):
+        with patch.dict(sys.modules, {"care_reach.hardware.arm_runtime": None}):
             self.assertEqual(main(["--dry-run", "--settings", str(self.settings_path),
                                    "--calibration", str(self.calibration_path),
                                    "--pose", str(self.pose_path)]), 0)
@@ -89,7 +90,7 @@ class ParkTests(unittest.TestCase):
             folded_target(self.pose_path)
 
     def test_execute_uses_measured_feedback_runner_and_park_bounds(self):
-        with patch("measured_pose_runner.MeasuredPoseRunner") as runner_type:
+        with patch("care_reach.hardware.measured_pose_runner.MeasuredPoseRunner") as runner_type:
             runner_type.return_value.move.return_value = {
                 "elapsed_s": 1.2,
                 "positions": dict(zip(JOINT_NAMES, folded_target(self.pose_path), strict=True)),
