@@ -12,7 +12,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from motion_core import JOINT_NAMES
-from server import Arm, HOME_TOLERANCE, POSE_TOLERANCE, STOP_SETTLE_LEAD, handler_for
+from server import Arm, GRIP_HOLD_LEAD, HOME_TOLERANCE, POSE_TOLERANCE, STOP_SETTLE_LEAD, handler_for
 
 
 class FakeBus:
@@ -138,6 +138,38 @@ class DashboardTests(DashboardBase):
         self.assertIsNone(arm.hold)
         self.assertEqual(bus.goals["gripper"], 2000)
         self.assertTrue(all(value == 1 for value in bus.torque.values()))
+
+    def test_gripper_closing_release_keeps_a_bounded_preload(self):
+        bus = FakeBus((2000,) * 6)
+        arm = self.arm(bus)
+        token = arm.start(6, -1)
+        arm.hold["last_goal"] = 1900
+        arm.stop(token)
+        self.assertEqual(bus.goals["gripper"], 2000 - GRIP_HOLD_LEAD)
+        self.assertEqual(bus.torque["gripper"], 1)
+
+    def test_gripper_timeout_keeps_preload_but_fault_releases_it(self):
+        bus = FakeBus((2000,) * 6)
+        arm = self.arm(bus)
+        arm.start(6, -1)
+        arm.hold["last_goal"] = 1900
+        arm.hold["expires"] = time.monotonic() - 1
+        arm._advance(time.monotonic())
+        self.assertEqual(bus.goals["gripper"], 2000 - GRIP_HOLD_LEAD)
+        self.assertEqual(arm.error, "Movement timed out and stopped")
+        arm.start(6, -1)
+        arm.hold["last_goal"] = 1900
+        bus.status["gripper"] = 32
+        arm.stop()
+        self.assertEqual(bus.goals["gripper"], 2000)
+
+    def test_gripper_close_to_tick_keeps_target_when_reached(self):
+        bus = FakeBus((2000,) * 6)
+        arm = self.arm(bus)
+        arm.go(1988)
+        arm._advance(time.monotonic() + 0.08)
+        self.assertIsNone(arm.hold)
+        self.assertEqual(bus.goals["gripper"], 1988)
 
     def test_faulted_gripper_does_not_block_healthy_jog_or_receive_commands(self):
         bus = FakeBus((2000,) * 6)

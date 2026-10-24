@@ -18,6 +18,8 @@ Only **one process** may own the serial bus. Before a standalone dance, park, or
 
 The Pi records timestamped motor positions, goals, voltage, status, load, temperature, motion commands, fault transitions, and errors in `~/.local/state/care-reach/telemetry.jsonl` (20 MB × 6 rotating files). It samples about once per second at rest and up to ten times per second while moving; status and voltage-threshold changes are recorded immediately when observed. Current readings are added when a fault or low-voltage transition is observed. Use `tail -n 30 ~/.local/state/care-reach/telemetry.jsonl` on the Pi, or expand **Recent power and servo events** in the dashboard. A previously reported voltage alarm on an idle, unrelated servo does not block a healthy joint after voltage has recovered; a new alarm during motion or a confirmed voltage below 4.8 V still stops the move. The controller does not resume a stopped move automatically.
 
+When a closing gripper jog ends normally or loses its heartbeat, the controller keeps a closing goal no more than 30 ticks inside its measured position, rather than replacing it with the measured position and letting the jaws rebound. A closing go-to-tick retains its target when it reaches it. A servo fault still ends the move with a measured-position hold, and the gripper should not be used to hold a critical load until its force and power delivery have been tested with that object.
+
 The USB camera's [live feed](docs/CAMERA.md) appears in the dashboard's **Camera** tab at the same dashboard address. The camera service stays on Pi localhost; the dashboard relays the feed to anyone who can reach the panel.
 
 ## Pose names

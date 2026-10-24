@@ -38,7 +38,8 @@ MAX_TARGET_LEAD = 80
 STOP_SETTLE_LEAD = 50  # Measured wrist coast reached 46 ticks at 8x speed.
 RECOVERY_MARGIN = 40  # Allow a small encoder drift past the saved fold, inward only.
 STEP_SECONDS = 0.04
-LEASE_SECONDS = 0.75
+LEASE_SECONDS = 1.5
+GRIP_HOLD_LEAD = 30  # Small closing preload after a normal release or lost heartbeat.
 MIN_VOLTAGE_RAW = 48
 MAX_LOAD = 900
 POSITION_TOLERANCE = 15
@@ -289,6 +290,13 @@ class Arm:
             return position
         return target
 
+    def _grip_hold_goal(self, hold, position):
+        """Keep a closing gripper's measured contact without a large stall gap."""
+        low, high, _, _ = self._safe_span(5, position)
+        command_goal = hold["target"] if hold["mode"] == "goto" else hold["last_goal"]
+        target = max(position - GRIP_HOLD_LEAD, min(position, command_goal))
+        return max(low, min(high, target))
+
     def _stop(self, *, settle=False):
         previous = self.hold
         self.hold = None
@@ -296,16 +304,35 @@ class Arm:
             return
         self.telemetry.write("motion_stopped", mode=previous["mode"],
                              motor=previous["motor"], pose=previous.get("pose"),
-                             settled=settle, snapshot=self.last_snapshot)
+                             settled=settle, heartbeats=previous.get("heartbeats"),
+                             heartbeat_age=(time.monotonic() - previous["last_heartbeat"])
+                             if "last_heartbeat" in previous else None,
+                             snapshot=self.last_snapshot)
         if previous["mode"] == "pose":
             self._hold_measured_all()
             return
-        if settle and previous["mode"] == "jog":
+        if settle and previous["mode"] in ("jog", "goto"):
             name = JOINT_NAMES[previous["motor"] - 1]
             if self._read("Torque_Enable")[name] != 1:
                 return
             position = self._read("Present_Position")[name]
-            self._write_goal(previous["motor"], self._settle_goal(previous, name, position))
+            closing_gripper = previous["motor"] == 6 and (
+                previous["direction"] < 0 or
+                (previous["mode"] == "goto" and previous["target"] < previous["start_position"])
+            )
+            if closing_gripper:
+                # A measured-position hold releases the jaws as soon as the
+                # closing command ends. Preserve a modest closing preload,
+                # but never push through a servo fault.
+                healthy = self._read("Status")[name] == 0
+                goal = self._grip_hold_goal(previous, position) if healthy else position
+            elif previous["mode"] == "jog":
+                goal = self._settle_goal(previous, name, position)
+            else:
+                goal = position
+            self._write_goal(previous["motor"], goal)
+            self.telemetry.write("hold_goal", motor=previous["motor"], goal=goal,
+                                 measured=position, snapshot=self.last_snapshot)
         else:
             self._hold_measured(previous["motor"])
 
@@ -617,10 +644,12 @@ class Arm:
         return {
             "token": uuid.uuid4().hex, "motor": motor, "mode": mode,
             "direction": direction, "target": position if target is None else target,
+            "start_position": position,
             "command": float(position), "velocity": 0.0, "last_goal": position,
             "last_position": position, "progress_at": now, "last_update": now,
             "expires": now + LEASE_SECONDS if mode == "jog" else now + 35,
             "high_load_count": 0,
+            "heartbeats": 0, "last_heartbeat": now,
             "next": now,
         }
 
@@ -628,7 +657,10 @@ class Arm:
         with self.lock:
             if not self.hold or self.hold["token"] != token or self.hold["mode"] != "jog":
                 raise ValueError("Hold ended")
-            self.hold["expires"] = time.monotonic() + LEASE_SECONDS
+            now = time.monotonic()
+            self.hold["expires"] = now + LEASE_SECONDS
+            self.hold["last_heartbeat"] = now
+            self.hold["heartbeats"] += 1
 
     def stop(self, token=None):
         with self.lock:
@@ -640,7 +672,8 @@ class Arm:
         if hold is None or now < hold["next"]:
             return
         if now >= hold["expires"]:
-            self._stop()
+            self._stop(settle=hold["mode"] == "jog" and hold["motor"] == 6
+                       and hold["direction"] < 0)
             self._set_error("Movement timed out and stopped")
             return
         if hold["mode"] == "pose":
@@ -669,7 +702,8 @@ class Arm:
         else:
             desired = hold["target"]
             if abs(position - desired) <= POSITION_TOLERANCE:
-                self._stop()
+                self._stop(settle=hold["motor"] == 6
+                           and hold["target"] < hold["start_position"])
                 return
         desired = max(low, min(high, desired))
         desired = max(position - MAX_TARGET_LEAD, min(position + MAX_TARGET_LEAD, desired))

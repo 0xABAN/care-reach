@@ -70,7 +70,7 @@
     <div id="status" class="status">Connecting to the arm…</div>
     <details class="history"><summary>Recent power and servo events</summary><ul id="fault-history"><li>Loading…</li></ul></details>
     <div id="joints" class="grid"></div>
-    <p class="hint muted">Forward increases encoder ticks. Saved joint limits are shown read-only; hold speed is 1×, 2×, 4×, or 8×. Home, Fold, and Dance move all six joints; Dance homes first and returns Home. Press the active button again to cancel. Torque remains on when a hold ends or this panel closes.</p>
+    <p class="hint muted">Forward increases encoder ticks. Saved joint limits are shown read-only; hold speed is 1×, 2×, 4×, or 8×. Closing the gripper keeps a bounded inward hold when released. Home, Fold, and Dance move all six joints; Dance homes first and returns Home. Press the active button again to cancel. Torque remains on when a hold ends or this panel closes.</p>
     </section>
     <section id="camera-panel" role="tabpanel" aria-labelledby="tab-camera" hidden>
       <h1>Live camera</h1>
@@ -156,6 +156,9 @@
         const result = await api('/api/hold/start', {motor, direction});
         current.token = result.token;
         if (!current.active) { await api('/api/hold/stop', {token: current.token}); return; }
+        api('/api/hold/heartbeat', {token: current.token}).catch(error => {
+          if (current.active) { show(error.message, true); endPress(); }
+        });
         current.timer = setInterval(async () => {
           if (!current.active) return;
           try { await api('/api/hold/heartbeat', {token: current.token}); }
