@@ -29,7 +29,7 @@
 <p>Say <strong>“Hey Arm, open the gripper”</strong> in one phrase. If the screen says <strong>“Wake heard”</strong>, say <strong>“open the gripper”</strong> within 12 seconds.</p>
 <div class="card">
   <div class="label">Arm action</div>
-  <p>The voice test starts in dry-run mode. Enable one small gripper-opening move for 60 seconds, then say the phrase. The arm action is disabled after one move. “Pick up the can” is reported but cannot move the arm until camera localization and grasping are built.</p>
+  <p>The voice test starts in dry-run mode. Enable one small gripper move for 60 seconds, then say “Hey Arm, open the gripper” or “Hey Arm, close the gripper.” The arm action is disabled after one move. Keep fingers clear of the gripper. “Pick up the can” is reported but cannot move the arm until camera localization and grasping are built.</p>
   <button onclick="setArm(true)">Enable one gripper move</button>
   <button onclick="setArm(false)">Disable arm action</button>
   <div class="value" id="arm">Dry run</div>
@@ -54,6 +54,7 @@
   <div class="label">Score a 90-second trial</div>
   <p>Click one expected result, then speak. This starts listening if paused. For “No wake word,” talk normally without saying “Hey Arm.”</p>
   <button onclick="trial('open_gripper')">Open gripper</button>
+  <button onclick="trial('close_gripper')">Close gripper</button>
   <button onclick="trial('pick_up_can')">Pick up can (unsupported)</button>
   <button onclick="trial('stop')">Stop</button>
   <button onclick="trial('cancel')">Cancel</button>

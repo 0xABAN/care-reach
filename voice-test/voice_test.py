@@ -262,7 +262,7 @@ class VoiceTest:
                 except (ValueError, KeyError, TypeError):
                     self.respond(400, b"Invalid request", "text/plain")
                     return
-                if expected not in {"pick_up_can", "open_gripper", "cancel", "stop", "none"}:
+                if expected not in {"pick_up_can", "open_gripper", "close_gripper", "cancel", "stop", "none"}:
                     self.respond(400, b"Invalid trial", "text/plain")
                     return
                 if not app.listening:
@@ -321,7 +321,7 @@ class VoiceTest:
                 self.stop.set()
             elif parts[0] == "report":
                 self.print(f"[report] {report()}")
-            elif parts[0] == "test" and len(parts) == 2 and parts[1] in {"pick_up_can", "open_gripper", "cancel", "stop", "none"}:
+            elif parts[0] == "test" and len(parts) == 2 and parts[1] in {"pick_up_can", "open_gripper", "close_gripper", "cancel", "stop", "none"}:
                 if self.trial:
                     self.finish_trial("replaced")
                 self.trial = Trial(self.next_trial_id, parts[1], time.monotonic() + TRIAL_SECONDS)
@@ -331,7 +331,7 @@ class VoiceTest:
                     self.ui.update(trial=f"Trial {self.trial.id}: {parts[1]} ({TRIAL_SECONDS} seconds)", raw="", decision="", command="", latency_ms=None)
                 self.print(f"[test {self.trial.id}] Expected: {parts[1]}. Speak now; trial lasts {TRIAL_SECONDS} seconds.")
             else:
-                self.print("[help] Type: test open_gripper | test pick_up_can | test cancel | test stop | test none | report | quit")
+                self.print("[help] Type: test open_gripper | test close_gripper | test pick_up_can | test cancel | test stop | test none | report | quit")
 
     def finish_trial(self, reason: str = "timeout") -> None:
         trial = self.trial
@@ -472,7 +472,7 @@ class VoiceTest:
         self.start_capture()
         self.print(f"[status] Starting USB microphone ({self.backend} device {self.device}); speech is sent to Cartesia")
         self.print(f"[status] Waiting for 'Hey Arm'... Speak 'Hey Arm, {self.example_phrase}'.")
-        self.print("[help] For scored trials type: test open_gripper | test pick_up_can | test cancel | test stop | test none")
+        self.print("[help] For scored trials type: test open_gripper | test close_gripper | test pick_up_can | test cancel | test stop | test none")
         self.print("[help] Type report for counts, quit to stop.")
         try:
             while not self.stop.is_set():

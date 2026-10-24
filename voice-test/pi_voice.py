@@ -19,7 +19,7 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 ROBOT_URL = "http://127.0.0.1:8765"
 MODEL = "openai/gpt-4.1-mini"
 MOTION_WINDOW_SECONDS = 60
-COMMANDS = {"open_gripper", "stop", "cancel", "pick_up_can", "none"}
+COMMANDS = {"open_gripper", "close_gripper", "stop", "cancel", "pick_up_can", "none"}
 
 
 def request_json(url: str, data: dict | None = None, *, headers: dict | None = None,
@@ -37,8 +37,9 @@ def classify_openrouter(text: str, key: str, model: str = MODEL) -> tuple[str, i
     prompt = (
         "Classify a short transcript for an assistive robot. Return only a JSON object "
         'with one key, "command", whose value is exactly one of: '
-        '"open_gripper", "stop", "cancel", "pick_up_can", "none". '
+        '"open_gripper", "close_gripper", "stop", "cancel", "pick_up_can", "none". '
         "Choose open_gripper only for an unambiguous request to open or release the gripper. "
+        "Choose close_gripper only for an unambiguous request to close the gripper. "
         "Choose stop only for an unambiguous request to stop current motion. "
         "Choose cancel only for an unambiguous request to cancel a pending request. "
         "Choose pick_up_can for a request to pick up a can, even though this robot cannot yet do it. "
@@ -99,7 +100,7 @@ class PiVoiceTest(VoiceTest):
                        for m in motors):
                 raise ValueError("Gripper is not ready")
             self.arm_enabled_until = time.monotonic() + MOTION_WINDOW_SECONDS
-            self.print(f"[arm] Gripper opening enabled for {MOTION_WINDOW_SECONDS} seconds.")
+            self.print(f"[arm] One gripper move enabled for {MOTION_WINDOW_SECONDS} seconds.")
         else:
             self.arm_enabled_until = 0.0
             self.print("[arm] Motion disabled. Voice decisions remain visible.")
@@ -127,11 +128,22 @@ class PiVoiceTest(VoiceTest):
             command = self.local_command(text)
         # An LLM result alone is never permission to move. Check the transcript too.
         words = normalize(text)
+        if command in {"open_gripper", "close_gripper"} and re.search(
+            r"\b(dont|do not|never|not|no)\b", words
+        ):
+            self.print("[guard] Rejected gripper action: transcript contains negation.")
+            return None
         if command == "open_gripper" and not (
             re.search(r"\b(open|release)\b", words)
             and re.search(r"\b(gripper|claw|hand|fingers)\b", words)
         ):
             self.print("[guard] Rejected gripper action: transcript did not ask to open it clearly.")
+            return None
+        if command == "close_gripper" and not (
+            re.search(r"\b(close|shut)\b", words)
+            and re.search(r"\b(gripper|claw|hand|fingers)\b", words)
+        ):
+            self.print("[guard] Rejected gripper action: transcript did not ask to close it clearly.")
             return None
         if command == "stop" and not re.search(r"\b(stop|halt|freeze)\b", words):
             return None
@@ -147,6 +159,9 @@ class PiVoiceTest(VoiceTest):
         if words in {"open the gripper", "open gripper", "release the gripper",
                      "open your hand", "open the claw"}:
             return "open_gripper"
+        if words in {"close the gripper", "close gripper", "shut the gripper",
+                     "close your hand", "close the claw"}:
+            return "close_gripper"
         if words in {"stop", "stop now", "halt", "freeze", "emergency stop"}:
             return "stop"
         if words in {"cancel", "cancel that", "never mind"}:
@@ -170,7 +185,7 @@ class PiVoiceTest(VoiceTest):
                 return "Stop sent to arm controller"
             except (HTTPError, URLError, TimeoutError, ValueError) as exc:
                 return f"Stop failed: {type(exc).__name__}"
-        if command != "open_gripper":
+        if command not in {"open_gripper", "close_gripper"}:
             return "No motor action for this command"
         if time.monotonic() >= self.arm_enabled_until:
             return "Dry run: enable arm action in this page for a 60-second test"
@@ -182,11 +197,18 @@ class PiVoiceTest(VoiceTest):
             gripper = next(m for m in state["motors"] if m["id"] == 6)
             if not gripper.get("motion_enabled") or gripper.get("fault"):
                 return "Not executed: gripper is not ready"
-            target = min(gripper["position"] + 120, gripper["effective_upper"])
-            if target - gripper["position"] < 25:
-                return "Not executed: gripper is already open near its limit"
+            if command == "open_gripper":
+                target = min(gripper["position"] + 120, gripper["effective_upper"])
+                distance = target - gripper["position"]
+                direction = "Opening"
+            else:
+                target = max(gripper["position"] - 120, gripper["effective_lower"])
+                distance = gripper["position"] - target
+                direction = "Closing"
+            if distance < 25:
+                return "Not executed: gripper is already near that limit"
             request_json(f"{ROBOT_URL}/api/motor6/go", {"target": target}, timeout=5)
-            return f"Opening gripper to tick {target} (120 tick maximum)"
+            return f"{direction} gripper to tick {target} (120 tick maximum)"
         except (HTTPError, URLError, TimeoutError, ValueError, KeyError, StopIteration) as exc:
             return f"Gripper action failed: {type(exc).__name__}"
 
