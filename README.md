@@ -33,7 +33,7 @@ The USB camera's [live feed](docs/CAMERA.md) appears in the dashboard's **Camera
 
 See [pose definitions and limits](docs/POSES.md). The camera-mounted controller has no automatic torque-release procedure.
 
-The Pi voice tester acts after the exact wake phrase **“Hey Arm”** followed by a command in the same utterance, or after “Hey Arm” alone followed by a command within 12 seconds. No dashboard click or separate motion enable is required. “Retract” and “go home” select Home; “extend” selects the upright pose; “dance” selects the saved choreography. “Open the hand” and “close the hand” use the bounded gripper move. The retired Fold pose is not a voice command.
+The Pi voice tester acts after the exact wake phrase **“Hey Arm”** followed by a command in the same utterance. The wake phrase can appear after other speech in Cartesia's final transcript. The Pi sends only the words after it to Jev (`typesafe/jev-1.14`) through OpenRouter; it never sends pre-wake speech for a command decision. No dashboard click or separate motion enable is required. “Retract” and “go home” select Home; “extend” selects the upright pose; “dance” selects the saved choreography. “Open the hand” and “close the hand” use the bounded gripper move. The retired Fold pose is not a voice command.
 
 ## Motion
 

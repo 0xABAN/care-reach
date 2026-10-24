@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pi USB microphone -> Cartesia STT -> OpenRouter command -> guarded dashboard API."""
+"""Pi microphone -> Cartesia STT -> Jev command decision -> guarded dashboard API."""
 
 from __future__ import annotations
 
@@ -7,43 +7,145 @@ import argparse
 import json
 import os
 import re
+import tempfile
+import threading
 import time
+from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from jev_decisions import classify_jev
 from voice_test import ROOT, VoiceTest, normalize
 
 
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 ROBOT_URL = "http://127.0.0.1:8765"
-MODEL = "openai/gpt-4.1-mini"
+MODEL = "typesafe/jev-1.14"
 COMMANDS = {"open_gripper", "close_gripper", "home", "extend", "dance",
             "stop", "cancel", "pick_up_can", "none"}
 POSE_COMMANDS = {"home", "extend", "dance"}
 MOTION_COMMANDS = POSE_COMMANDS | {"open_gripper", "close_gripper"}
+WAKE_PATTERN = re.compile(r"\bhey[\s,.!?-]+arm\b", re.IGNORECASE)
+
+# Cartesia can put a clear request inside a longer final turn when other
+# people are talking. Match the request near the wake word, then ignore
+# unrelated words later in that same turn.
+COMMAND_PATTERNS = {
+    "open_gripper": r"(?:open|release) (?:the |your )?(?:gripper|claw|hand|fingers)",
+    "close_gripper": r"(?:close|shut) (?:the |your )?(?:gripper|claw|hand|fingers)",
+    "home": (r"(?:retract(?: the arm)?|attract|go (?:to )?(?:the )?home(?: position)?|"
+             r"return (?:to )?home|home the arm|move (?:the arm|it) home)"),
+    "extend": r"(?:extend(?: the arm)?|(?:raise|point|move) (?:the arm|it) straight up)",
+    "dance": r"(?:dance(?: for me)?|do (?:a|the) dance|start (?:the )?dance)",
+    "stop": r"(?:stop(?: now)?|halt|freeze|emergency stop)",
+    "cancel": r"(?:cancel(?: that)?|never mind)",
+}
+MODEL_CUES = {
+    "open_gripper": r"\b(?:open|release|unclench|let go of)\b.{0,35}\b(?:hand|gripper|claw|fingers|it)\b",
+    "close_gripper": r"\b(?:close|shut|clench|grip)\b.{0,35}\b(?:hand|gripper|claw|fingers|it)\b",
+    "home": r"\b(?:retract|attract|home|pull (?:the )?arm back|bring (?:the )?arm back|draw (?:the )?arm back)\b",
+    "extend": r"\b(?:extend|upright|straight up|raise (?:the )?arm|lift (?:the )?arm|point (?:the )?arm up)\b",
+    "dance": r"\b(?:dance|jig|wiggle)\b",
+    "stop": r"\b(?:stop|halt|freeze)\b",
+    "cancel": r"\b(?:cancel|never mind|forget that)\b",
+}
+DIRECT_PREFIX = re.compile(
+    r"(?:(?:please|uh|um|okay|alright|well|so) )*"
+    r"(?:(?:(?:can|could|would) you|go ahead and|i want you to) )?"
+    r"(?:(?:please|uh|um) )*"
+)
+DESCRIPTIVE_CONTEXT = re.compile(
+    r"\b(?:i saw|we saw|they saw|we were talking|talking about|discussing|"
+    r"mentioned|you said|i said|someone said|he said|she said|they said|"
+    r"heard someone)\b"
+)
+
+
+def quoted_span(text: str, start: int, end: int) -> bool:
+    """Whether a wake phrase or command is within quoted speech."""
+    marks = {'"', '“', '”'}
+    return (sum(char in marks for char in text[:start]) % 2 == 1
+            or any(char in marks for char in text[start:end]))
+
+
+def local_request(text: str) -> str | None:
+    """Return one unambiguous command near the start of a post-wake turn."""
+    words = normalize(text)
+    tokens = words.split()
+    if not tokens:
+        return None
+    raw_tokens = list(re.finditer(r"[a-z0-9]+", text, flags=re.IGNORECASE))
+    hits: list[tuple[str, int, int]] = []
+    for command, pattern in COMMAND_PATTERNS.items():
+        for match in re.finditer(r"\b" + pattern + r"\b", words):
+            start = len(words[:match.start()].split())
+            end = len(words[:match.end()].split())
+            if not quoted_span(text, raw_tokens[start].start(), raw_tokens[end - 1].end()):
+                hits.append((command, start, end))
+    nearby_hits = [hit for hit in hits if hit[1] <= 5
+                   and DIRECT_PREFIX.fullmatch(" ".join(tokens[:hit[1]]) + (" " if hit[1] else ""))]
+    if not nearby_hits:
+        return None
+    # A nearby second request is ambiguous, even if an LLM picks one.
+    nearby = {command for command, start, _ in hits if start <= 8}
+    if len(nearby) != 1:
+        return None
+    command, start, end = min(nearby_hits, key=lambda hit: hit[1])
+    before = " ".join(tokens[max(0, start - 4):start])
+    after = " ".join(tokens[end:end + 2])
+    if re.search(r"\b(?:dont|don t|do not|never|not|no|avoid|without|maybe|perhaps|"
+                 r"possibly|should i|could i|can i|what if|instead of)\b", before):
+        return None
+    if re.search(r"\b(?:not|no|never|dont|don t)\b", after):
+        return None
+    return command
+
+
+def jev_state(text: str) -> str:
+    """Use a clear spoken command clause, leaving unclear requests intact."""
+    command = local_request(text)
+    if command is None:
+        return text
+    words = normalize(text)
+    raw_tokens = list(re.finditer(r"[a-z0-9]+", text, flags=re.IGNORECASE))
+    for match in re.finditer(r"\b" + COMMAND_PATTERNS[command] + r"\b", words):
+        start = len(words[:match.start()].split())
+        end = len(words[:match.end()].split())
+        if start <= 5:
+            return text[raw_tokens[start].start():raw_tokens[end - 1].end()]
+    return text
 
 
 def grounded_request(text: str, command: str) -> bool:
-    """Require a direct request even when a classifier proposes a command."""
-    if any(mark in text for mark in ('"', '“', '”')):
+    """Reject obvious ambiguity and non-commands after Jev's intent decision."""
+    direct = local_request(text)
+    if direct:
+        return direct == command
+    if command not in MODEL_CUES:
         return False
     words = normalize(text)
-    checked = words.replace("never mind", "") if command == "cancel" else words
-    if re.search(r"\b(dont|do not|never|not|no|avoid|without|maybe|perhaps|"
-                 r"possibly|should i|could i|can i|what if|instead of)\b", checked):
+    tokens = words.split()
+    early = " ".join(tokens[:12])
+    if any(mark in text for mark in ('"', '“', '”')):
         return False
-    prefix = r"(?:please |can you |could you |would you |go ahead and |i want you to )?"
-    core = {
-        "open_gripper": r"(?:open|release) (?:the |your )?(?:gripper|claw|hand|fingers)",
-        "close_gripper": r"(?:close|shut) (?:the |your )?(?:gripper|claw|hand|fingers)",
-        "home": r"(?:retract(?: the arm)?|go (?:to )?(?:the )?home(?: position)?|"
-                r"return (?:to )?home|home the arm|move (?:the arm|it) home)",
-        "extend": r"(?:extend(?: the arm)?|(?:raise|point|move) (?:the arm|it) straight up)",
-        "dance": r"(?:dance(?: for me)?|do (?:a|the) dance|start (?:the )?dance)",
-        "stop": r"(?:stop(?: now)?|halt|freeze|emergency stop)",
-        "cancel": r"(?:cancel(?: that)?|never mind)",
-    }.get(command)
-    return bool(core and re.fullmatch(prefix + core + r"(?: please)?", words))
+    if re.search(r"\b(?:dont|don t|do not|never|not|no|avoid|without|maybe|perhaps|"
+                 r"possibly|should i|could i|can i|what if|instead of|i think)\b", early):
+        return False
+    if re.match(r"(?:what|why|how|when|where|is|are|does|do)\b", early):
+        return False
+    if DESCRIPTIVE_CONTEXT.search(early):
+        return False
+    raw_tokens = list(re.finditer(r"[a-z0-9]+", text, flags=re.IGNORECASE))
+    cues: set[str] = set()
+    for candidate, pattern in MODEL_CUES.items():
+        for match in re.finditer(pattern, words):
+            start = len(words[:match.start()].split())
+            end = len(words[:match.end()].split())
+            if start <= 8 and not quoted_span(text, raw_tokens[start].start(),
+                                             raw_tokens[end - 1].end()):
+                cues.add(candidate)
+    if cues and cues != {command}:
+        return False
+    return True
 
 
 def request_json(url: str, data: dict | None = None, *, headers: dict | None = None,
@@ -57,48 +159,6 @@ def request_json(url: str, data: dict | None = None, *, headers: dict | None = N
     return result
 
 
-def classify_openrouter(text: str, key: str, model: str = MODEL) -> tuple[str, int]:
-    prompt = (
-        "Classify a short transcript for an assistive robot. Return only a JSON object "
-        'with one key, "command", whose value is exactly one of: '
-        '"open_gripper", "close_gripper", "home", "extend", "dance", '
-        '"stop", "cancel", "pick_up_can", "none". '
-        "Choose open_gripper only for an unambiguous request to open or release the gripper. "
-        "Choose close_gripper only for an unambiguous request to close the gripper. "
-        "Choose home for retract or return to the saved Home pose. "
-        "Choose extend for a request to point the arm straight up. "
-        "Choose dance only for an explicit request to dance. Never choose fold: "
-        "the wrist camera makes the old folded pose unsafe. "
-        "Choose stop only for an unambiguous request to stop current motion. "
-        "Choose cancel only for an unambiguous request to cancel a pending request. "
-        "Choose pick_up_can for a request to pick up a can, even though this robot cannot yet do it. "
-        "Choose none for all other requests, questions, negation, uncertainty, or quoted commands. "
-        "Never create a motor target or suggest a new command."
-    )
-    payload = {
-        "model": model,
-        "temperature": 0,
-        "max_tokens": 45,
-        "response_format": {"type": "json_object"},
-        "messages": [{"role": "system", "content": prompt},
-                     {"role": "user", "content": text[:300]}],
-    }
-    start = time.monotonic()
-    response = request_json(OPENROUTER_URL, payload, headers={
-        "Authorization": f"Bearer {key}", "Content-Type": "application/json",
-        "HTTP-Referer": "https://github.com/0xABAN/care-reach",
-        "X-Title": "Care Reach Pi Voice Test",
-    }, timeout=15)
-    elapsed_ms = round((time.monotonic() - start) * 1000)
-    content = response["choices"][0]["message"]["content"]
-    if not isinstance(content, str):
-        raise ValueError("OpenRouter returned no command text")
-    command = json.loads(content).get("command")
-    if command not in COMMANDS:
-        raise ValueError("OpenRouter returned an invalid command")
-    return command, elapsed_ms
-
-
 class PiVoiceTest(VoiceTest):
     def __init__(self, device: str, cartesia_key: str, openrouter_key: str, model: str,
                  stt_mode: str = "stream"):
@@ -109,25 +169,50 @@ class PiVoiceTest(VoiceTest):
         self.dashboard_file = ROOT / "pi_dashboard.html"
         self.example_phrase = "open the hand"
         self.segmenter.silence_frames = 18
-        self.openrouter_disabled = os.environ.get("OPENROUTER_DISABLED") == "1"
-        self.command_backend = ("Local exact phrases (OpenRouter key rejected)"
-                                if self.openrouter_disabled else "OpenRouter (awaiting first command)")
+        self.command_backend = "Jev (awaiting first command)"
         stt_model = "Ink-2 (streaming)" if stt_mode == "stream" else "Ink-Whisper (batch)"
         self.ui["model"] = f"Cartesia {stt_model} + {model}"
         self.ui["stt_mode"] = stt_mode
         self.ui["action"] = ""
+        self.toggle_lock = threading.Lock()
+        self.listening_state_file = Path(os.environ.get(
+            "CARE_REACH_VOICE_LISTENING_STATE",
+            str(Path.home() / ".config/care-reach/voice-listening.json")))
+        try:
+            saved = json.loads(self.listening_state_file.read_text())
+            self.listening = saved["enabled"] is True
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError, KeyError, TypeError):
+            self.listening = False  # Invalid saved state must not resume paid streaming.
+        self.ui["listening"] = self.listening
+
+    def set_listening(self, enabled: bool) -> None:
+        with self.toggle_lock:
+            super().set_listening(enabled)
+            try:
+                self.listening_state_file.parent.mkdir(parents=True, exist_ok=True)
+                with tempfile.NamedTemporaryFile("w", dir=self.listening_state_file.parent,
+                                                 prefix=".voice-listening-", delete=False) as state:
+                    json.dump({"enabled": enabled}, state)
+                    temp_path = state.name
+                os.replace(temp_path, self.listening_state_file)
+            except OSError as error:
+                self.print(f"[error] Could not persist listening setting ({type(error).__name__}).")
 
     def parse_wake(self, text: str) -> tuple[bool, str]:
         words = normalize(text)
-        if words == "hey arm":
-            return True, ""
-        if words.startswith("hey arm "):
-            return True, words[len("hey arm "):]
-        return False, words
+        match = next((candidate for candidate in WAKE_PATTERN.finditer(text)
+                      if not quoted_span(text, *candidate.span())), None)
+        return (True, normalize(text[match.end():])) if match else (False, words)
+
+    def allow_followup_without_wake(self) -> bool:
+        return False
 
     def command_after_wake(self, text: str) -> str:
-        return re.sub(r"^\s*hey[\s,.!?-]+arm\b[\s,.!?-]*", "", text,
-                      count=1, flags=re.IGNORECASE).strip()
+        match = next((candidate for candidate in WAKE_PATTERN.finditer(text)
+                      if not quoted_span(text, *candidate.span())), None)
+        return text[match.end():].strip() if match else text.strip()
 
     def extra_state(self) -> dict:
         return {
@@ -137,30 +222,18 @@ class PiVoiceTest(VoiceTest):
 
     def choose_command(self, text: str) -> str | None:
         self.command_latency_ms = None
-        command = self.local_command(text)
-        if command != "none":
-            self.command_latency_ms = 0
-            self.command_backend = "Local exact phrase (fast path)"
-        else:
-            command = None
-        if command is None and not self.openrouter_disabled:
-            try:
-                command, self.command_latency_ms = classify_openrouter(
-                    text, self.openrouter_key, self.openrouter_model)
-                self.command_backend = "OpenRouter"
-            except HTTPError as exc:
-                if exc.code == 401:
-                    self.openrouter_disabled = True
-                    self.print("[error] OpenRouter key rejected (HTTP 401). Using local exact phrases until restart.")
-                else:
-                    self.print(f"[error] OpenRouter returned HTTP {exc.code}. Using local exact phrases.")
-            except (URLError, TimeoutError, ValueError, KeyError, IndexError,
-                    TypeError, json.JSONDecodeError) as exc:
-                self.print(f"[error] OpenRouter command request failed ({type(exc).__name__}). Using local exact phrases.")
-        if command is None:
-            self.command_backend = ("Local exact phrases (OpenRouter key rejected)"
-                                    if self.openrouter_disabled else "Local exact phrases")
-            command = self.local_command(text)
+        try:
+            command, self.command_latency_ms = classify_jev(
+                jev_state(text), self.openrouter_key, self.openrouter_model)
+            self.command_backend = "Jev"
+        except (HTTPError, URLError, TimeoutError, ValueError, KeyError, IndexError,
+                TypeError, json.JSONDecodeError, RuntimeError) as exc:
+            self.command_backend = "Jev unavailable"
+            self.print(f"[error] Jev command decision failed ({type(exc).__name__}); no motion sent.")
+            return None
+        if command not in COMMANDS:
+            self.print("[guard] Jev returned an unsupported command.")
+            return None
         if command in MOTION_COMMANDS | {"stop", "cancel"} and not grounded_request(text, command):
             self.print(f"[guard] Rejected {command}: transcript is not a direct request.")
             return None
@@ -170,31 +243,13 @@ class PiVoiceTest(VoiceTest):
 
     @staticmethod
     def local_command(text: str) -> str:
+        command = local_request(text)
+        if command:
+            return command
         words = normalize(text)
-        if words in {"open the gripper", "open gripper", "release the gripper",
-                     "open your hand", "open the hand", "open the claw"}:
-            return "open_gripper"
-        if words in {"close the gripper", "close gripper", "shut the gripper",
-                     "close your hand", "close the hand", "close the claw"}:
-            return "close_gripper"
-        if words in {"go home", "go to home", "go to home position", "go to the home position",
-                     "return home", "retract", "retract the arm"}:
-            return "home"
-        if words in {"extend", "extend the arm", "point the arm straight up",
-                     "raise the arm straight up"}:
-            return "extend"
-        if words in {"dance", "do a dance", "do the dance", "start the dance"}:
-            return "dance"
-        if words in {"stop", "stop now", "halt", "freeze", "emergency stop"}:
-            return "stop"
-        if words in {"cancel", "cancel that", "never mind"}:
-            return "cancel"
         if words in {"pick up the can", "pick up a can", "grab the can",
                      "pick up that can"}:
             return "pick_up_can"
-        for command in ("stop", "cancel", "open_gripper", "close_gripper", "home", "extend", "dance"):
-            if grounded_request(text, command):
-                return command
         return "none"
 
     def execute_command(self, command: str) -> str:

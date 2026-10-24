@@ -223,6 +223,8 @@ class VoiceTest:
         self.streaming_stt = None
         self.streaming_active = False
         self.stream_close_pending = False
+        self.stream_lock = threading.RLock()
+        self.stream_generation = 0
         self.transcript_queue: queue.Queue[tuple[str, dict]] = queue.Queue()
         self.diagnostic_audio: deque[bytes] = deque(maxlen=400)
         self.ui["stt_mode"] = "batch"
@@ -235,16 +237,85 @@ class VoiceTest:
                 self.ui["status"] = message[len("[status] "):]
 
     def set_listening(self, enabled: bool) -> None:
-        self.listening = enabled
+        old_stream = None
+        with self.stream_lock:
+            self.listening = enabled
+            self.armed_until = 0.0
+            if not enabled:
+                self.stream_generation += 1
+                old_stream = self.streaming_stt
+                self.streaming_stt = None
+                self.streaming_active = False
+                self.stream_close_pending = False
+                self.speech = []
+                self.pre_roll.clear()
+                self.segmenter.reset()
+                while not self.frame_queue.empty():
+                    try:
+                        self.frame_queue.get_nowait()
+                    except queue.Empty:
+                        break
+                while not self.transcript_queue.empty():
+                    try:
+                        self.transcript_queue.get_nowait()
+                    except queue.Empty:
+                        break
         with self.ui_lock:
             self.ui["listening"] = enabled
+        if old_stream:
+            old_stream.close()
+        if enabled and self.stt_mode == "stream" and not self.streaming_active:
+            try:
+                self._start_stream()
+            except Exception as error:
+                with self.stream_lock:
+                    failed = self.streaming_stt
+                    self.streaming_stt = None
+                    self.streaming_active = False
+                if failed:
+                    failed.close()
+                self.print(f"[error] Streaming STT restart failed ({type(error).__name__}).")
         self.print("[status] Waiting for 'Hey Arm'..." if enabled else "[status] Paused. No audio sent to Cartesia.")
+
+    def _start_stream(self) -> None:
+        from streaming_stt import StreamingSTT
+        with self.stream_lock:
+            if not self.listening:
+                return
+            self.stream_generation += 1
+            generation = self.stream_generation
+            stream = StreamingSTT(
+                self.api_key,
+                lambda raw, timing: self._stream_turn(generation, raw, timing),
+                lambda error: self._stream_error(generation, error),
+                sample_rate=SAMPLE_RATE, turn_end_timeout_ms=640)
+            self.streaming_stt = stream
+            stream.start()
+            self.streaming_active = True
+        with self.ui_lock:
+            self.ui["stt_mode"] = "stream"
+        self.print("[status] Streaming microphone audio to Cartesia")
+
+    def _stream_turn(self, generation: int, raw: str, timing: dict) -> None:
+        with self.stream_lock:
+            if generation != self.stream_generation:
+                return
+            self.on_streaming_turn(raw, timing)
+
+    def _stream_error(self, generation: int, error: Exception) -> None:
+        with self.stream_lock:
+            if generation != self.stream_generation:
+                return
+            self.on_streaming_error(error)
 
     def parse_wake(self, text: str) -> tuple[bool, str]:
         return split_wake(text)
 
     def command_after_wake(self, text: str) -> str:
         return raw_command_after_wake(text)
+
+    def allow_followup_without_wake(self) -> bool:
+        return True
 
     def start_web(self, port: int) -> None:
         app = self
@@ -341,15 +412,8 @@ class VoiceTest:
     def start_capture(self) -> None:
         if self.stt_mode == "stream":
             try:
-                from streaming_stt import StreamingSTT
-                self.streaming_stt = StreamingSTT(
-                    self.api_key, self.on_streaming_turn, self.on_streaming_error,
-                    sample_rate=SAMPLE_RATE, turn_end_timeout_ms=640)
-                self.streaming_stt.start()
-                self.streaming_active = True
-                with self.ui_lock:
-                    self.ui["stt_mode"] = "stream"
-                self.print("[status] Streaming microphone audio to Cartesia")
+                if self.listening:
+                    self._start_stream()
             except Exception as error:
                 if self.streaming_stt:
                     try:
@@ -381,6 +445,8 @@ class VoiceTest:
             if len(frame) != FRAME_BYTES:
                 self.stop.set()
                 break
+            if not self.listening:
+                continue
             if self.streaming_active:
                 self.handle_streaming_frame(frame)
                 continue
@@ -402,12 +468,14 @@ class VoiceTest:
                 self.ui["mic_level"] = round(self.rms(frame))
                 self.ui["trigger_level"] = 0  # Server determines streaming turn boundaries.
             self.level_frames = 0
-        if self.listening:
+        with self.stream_lock:
+            if not self.listening or not self.streaming_active or self.streaming_stt is None:
+                return
             self.diagnostic_audio.append(frame)
-        try:
-            self.streaming_stt.send(frame if self.listening else bytes(FRAME_BYTES))
-        except Exception as error:
-            self.on_streaming_error(error)
+            try:
+                self.streaming_stt.send(frame)
+            except Exception as error:
+                self.on_streaming_error(error)
 
     def on_streaming_turn(self, raw: str, timing: dict) -> None:
         if self.streaming_active and self.listening:
@@ -568,17 +636,18 @@ class VoiceTest:
         if decision_started is None:
             decision_started = time.monotonic()
         wake, _ = self.parse_wake(raw)
-        armed = time.monotonic() < self.armed_until
+        armed = self.allow_followup_without_wake() and time.monotonic() < self.armed_until
         decision = "rejected"
         command = ""
         if wake:
-            self.armed_until = time.monotonic() + WAKE_SECONDS
+            self.armed_until = (time.monotonic() + WAKE_SECONDS
+                                if self.allow_followup_without_wake() else 0.0)
             if self.trial:
                 self.trial.wake_seen = True
             decision = "wake_detected"
             match = ("Hey Arm detected" if normalize(raw).startswith("hey arm")
                      else "Approximate Hey Arm match")
-            self.print(f"[wake] {match}. Next command within {WAKE_SECONDS}s.")
+            self.print(f"[wake] {match}.")
         classifier_ms = 0
         if wake or armed:
             # Preserve the original punctuation for the Pi's grounding guard.
@@ -662,14 +731,16 @@ class VoiceTest:
         self.print("[help] Type report for counts, quit to stop.")
         try:
             while not self.stop.is_set():
-                if self.stream_close_pending:
-                    try:
-                        self.streaming_stt.close()
-                    except Exception as error:
-                        self.print(f"[error] Streaming cleanup failed ({type(error).__name__}).")
-                    finally:
+                with self.stream_lock:
+                    failed_stream = self.streaming_stt if self.stream_close_pending else None
+                    if self.stream_close_pending:
                         self.streaming_stt = None
                         self.stream_close_pending = False
+                if failed_stream:
+                    try:
+                        failed_stream.close()
+                    except Exception as error:
+                        self.print(f"[error] Streaming cleanup failed ({type(error).__name__}).")
                 self.handle_console()
                 self.handle_streaming_turns()
                 if self.trial and time.monotonic() >= self.trial.deadline:

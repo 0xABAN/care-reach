@@ -16,7 +16,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import URLError
 from urllib.parse import urlsplit
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 from serial.tools import list_ports
 from lerobot.motors import Motor, MotorNormMode, SerialMotorsBus
@@ -925,6 +925,23 @@ def motor_id(value):
 
 
 ACCEPTED_HOSTNAMES = ("localhost", "127.0.0.1", "pi", "pi.local")
+VOICE_URL = "http://127.0.0.1:8770"
+
+
+def voice_state():
+    """Expose only the voice switch state, not transcripts or room audio."""
+    with urlopen(f"{VOICE_URL}/state", timeout=3) as response:
+        state = json.load(response)
+    return {"enabled": state["listening"], "stt_mode": state.get("stt_mode", "unknown")}
+
+
+def set_voice_enabled(enabled):
+    payload = json.dumps({"enabled": enabled}).encode()
+    request = Request(f"{VOICE_URL}/listen", data=payload,
+                      headers={"Content-Type": "application/json"}, method="POST")
+    with urlopen(request, timeout=3) as response:
+        response.read()
+    return {"enabled": enabled}
 
 
 def handler_for(arm, port):
@@ -1004,6 +1021,12 @@ def handler_for(arm, port):
                 except Exception as exc:
                     logging.exception("State read failed")
                     self.reply(503, {"error": f"Motor communication error: {exc}"})
+            elif path == "/api/transcription":
+                try:
+                    self.reply(200, voice_state())
+                except (OSError, URLError, ValueError, KeyError, TypeError) as exc:
+                    logging.warning("Voice service unavailable: %s", type(exc).__name__)
+                    self.reply(503, {"error": "Transcription service unavailable"})
             elif path == "/api/diagnostics":
                 try:
                     self.reply(200, arm.diagnostics())
@@ -1026,7 +1049,16 @@ def handler_for(arm, port):
                 if not isinstance(data, dict):
                     raise ValueError("JSON body must be an object")
                 path = urlsplit(self.path).path
-                if path == "/api/hold/start":
+                if path == "/api/transcription":
+                    if set(data) != {"enabled"} or type(data["enabled"]) is not bool:
+                        raise ValueError("enabled must be boolean")
+                    try:
+                        result = set_voice_enabled(data["enabled"])
+                    except (OSError, URLError, ValueError) as exc:
+                        logging.warning("Voice service unavailable: %s", type(exc).__name__)
+                        self.reply(503, {"error": "Transcription service unavailable"})
+                        return
+                elif path == "/api/hold/start":
                     motor = motor_id(data.get("motor"))
                     direction = data.get("direction")
                     if type(direction) is not int or direction not in (-1, 1):

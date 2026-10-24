@@ -708,6 +708,61 @@ class HttpHostTests(unittest.TestCase):
         status = int(header_blob.split(b" ", 2)[1])
         return status, json.loads(payload) if parse_json else (header_blob, payload)
 
+    @staticmethod
+    def call_post(handler_class, path, data, headers=None):
+        body = json.dumps(data).encode()
+        handler = handler_class.__new__(handler_class)
+        handler.path = path
+        handler.headers = {"Host": "pi.local:8765", "Content-Type": "application/json",
+                           "Content-Length": str(len(body)), **(headers or {})}
+        handler.client_address = ("192.168.1.23", 43210)
+        handler.connection = type("FakeConnection", (), {"getsockname": lambda self: ("192.168.1.42", 8765)})()
+        handler.rfile = io.BytesIO(body)
+        handler.wfile = io.BytesIO()
+        handler._headers_buffer = []
+        handler.requestline = f"POST {path} HTTP/1.1"
+        handler.request_version = "HTTP/1.1"
+        handler.server_version = "Fake/1.0"
+        handler.sys_version = "Python/3"
+        handler.protocol_version = "HTTP/1.1"
+        handler.do_POST()
+        header_blob, _, payload = handler.wfile.getvalue().partition(b"\r\n\r\n")
+        return int(header_blob.split(b" ", 2)[1]), json.loads(payload)
+
+    def test_transcription_switch_proxies_only_voice_state(self):
+        page = (Path(__file__).resolve().parents[1] / "static" / "index.html").read_text()
+        self.assertIn('id="transcription-toggle"', page)
+        self.assertIn("'/api/transcription'", page)
+
+        with patch("server.urlopen", return_value=io.BytesIO(
+                b'{"listening":true,"stt_mode":"stream","raw":"private speech"}')) as request:
+            status, state = self.call(self.handler, {"Host": "pi.local:8765"},
+                                      path="/api/transcription")
+        self.assertEqual((status, state), (200, {"enabled": True, "stt_mode": "stream"}))
+        request.assert_called_once_with("http://127.0.0.1:8770/state", timeout=3)
+
+        for enabled in (False, True):
+            with patch("server.urlopen", return_value=io.BytesIO(b"OK")) as request:
+                status, state = self.call_post(self.handler, "/api/transcription", {"enabled": enabled})
+            self.assertEqual((status, state), (200, {"enabled": enabled}))
+            outbound = request.call_args.args[0]
+            self.assertEqual(outbound.full_url, "http://127.0.0.1:8770/listen")
+            self.assertEqual(json.loads(outbound.data), {"enabled": enabled})
+
+        with patch("server.urlopen") as request:
+            status, state = self.call_post(self.handler, "/api/transcription", {"enabled": 1})
+        self.assertEqual((status, state), (400, {"error": "enabled must be boolean"}))
+        request.assert_not_called()
+
+    def test_transcription_service_unavailable_is_separate_from_arm_state(self):
+        with patch("server.urlopen", side_effect=OSError("voice offline")):
+            status, state = self.call(self.handler, {"Host": "pi.local:8765"},
+                                      path="/api/transcription")
+        self.assertEqual((status, state), (503, {"error": "Transcription service unavailable"}))
+        status, state = self.call(self.handler, {"Host": "pi.local:8765"}, path="/api/state")
+        self.assertEqual(status, 200)
+        self.assertIn("motors", state)
+
     def test_camera_tab_and_same_origin_stream(self):
         page = (Path(__file__).resolve().parents[1] / "static" / "index.html").read_text()
         self.assertIn('id="tab-camera"', page)

@@ -21,13 +21,13 @@
   #connection { color: #fca5a5; }
 </style>
 <h1>Care Reach Pi voice test</h1>
-<span class="badge">Pi USB mic · Cartesia transcription · OpenRouter command selection</span>
+<span class="badge">Pi USB mic · Cartesia transcription · Jev decision model via OpenRouter</span>
 <p>Models: <strong id="model">Loading…</strong></p>
 <p>Command path: <strong id="commandBackend">Checking…</strong></p>
-<p>Audio streams to Cartesia while listening. After “Hey Arm,” the Pi checks exact command phrases, then uses OpenRouter when needed.</p>
+<p>Cartesia transcribes the mic live. When it hears “Hey Arm,” the Pi sends only the words after that phrase to Jev through OpenRouter. Jev chooses the command.</p>
 <button id="listenButton" onclick="toggleListening()">Pause listening</button>
 <p>Try <strong>“Hey Arm, open the hand”</strong>, “close the hand,” “retract,” “extend,” or “dance.” Retract goes to Home. Extend points the arm straight up. Fold is disabled because the wrist camera blocks that position.</p>
-<p>Say “Hey Arm” with the command, or say it first and give the command within 12 seconds. Keep clear of the arm while it moves. “Pick up the can” is recognized, but it cannot run until the camera can locate the can.</p>
+<p>Say “Hey Arm” and the command in the same utterance. Keep clear of the arm while it moves. “Pick up the can” is recognized, but it cannot run until the camera can locate the can.</p>
 <p id="connection"></p>
 <div class="card"><div class="label">Live status</div><div class="value" id="status">Connecting…</div></div>
 <div class="card"><div class="label">USB mic level</div><div class="value" id="level">—</div><p>The number should rise when you speak. Cartesia decides when a phrase ends in streaming mode.</p></div>
