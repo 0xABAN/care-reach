@@ -13,7 +13,7 @@ from motion_core import JOINT_NAMES, SafetyBounds
 from park import HOME
 from shake_it_crazy_style import (
     AMPLITUDE_TICKS, DURATION_S, HOME_TOLERANCE, WRIST, WRIST_INDEX,
-    ShakeSafetyError, WristShake, main, waveform,
+    ShakeSafetyError, WristShake, TRIAL_ACCELERATION, TRIAL_GOAL_SPEED, main, waveform,
 )
 
 BOUNDS = SafetyBounds((1116, 903, 881, 863, 0, 1317),
@@ -42,12 +42,17 @@ class FakeBus:
         self.voltage = dict.fromkeys(JOINT_NAMES, 53)
         self.load = dict.fromkeys(JOINT_NAMES, 50)
         self.mode = dict.fromkeys(JOINT_NAMES, 0)
+        self.current = dict.fromkeys(JOINT_NAMES, 3)
+        self.speed = dict.fromkeys(JOINT_NAMES, 8)
+        self.acceleration = dict.fromkeys(JOINT_NAMES, 3)
+        self.events = []
 
     def connect(self, handshake=True):
         assert handshake
         self.connected = True
 
     def disconnect(self, disable_torque=True):
+        self.events.append(("disconnect", disable_torque))
         self.disconnects.append(disable_torque)
         self.connected = False
 
@@ -60,12 +65,24 @@ class FakeBus:
             "Present_Voltage": self.voltage,
             "Present_Load": self.load,
             "Operating_Mode": self.mode,
+            "Present_Current": self.current,
             "Min_Position_Limit": dict.fromkeys(JOINT_NAMES, 0),
             "Max_Position_Limit": dict.fromkeys(JOINT_NAMES, 4095),
         }[register].copy()
 
+    def read(self, register, name, normalize=True, num_retry=0):
+        assert self.connected and name == WRIST and not normalize and num_retry == 2
+        return {"Goal_Speed": self.speed, "Acceleration": self.acceleration,
+                "Present_Current": self.current}[register][name]
+
+    def write(self, register, name, value, normalize=True, num_retry=0):
+        assert self.connected and name == WRIST and not normalize and num_retry == 2
+        self.events.append((register, value))
+        {"Goal_Speed": self.speed, "Acceleration": self.acceleration}[register][name] = value
+
     def sync_write(self, register, goals, normalize=True):
         assert self.connected and register == "Goal_Position" and not normalize
+        self.events.append((register, goals.copy()))
         self.writes.append(goals.copy())
         for name, goal in goals.items():
             delta = goal - self.positions[name]
@@ -90,7 +107,22 @@ class WristShakeTests(unittest.TestCase):
 
     def test_exact_duration_bounds_only_wrist_moves_and_torque_remains_on(self):
         bus = FakeBus("unused")
-        result = self._run(bus)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            result = self._run(bus)
+        lines = [line for line in output.getvalue().splitlines() if line.startswith("shake t=")]
+        self.assertGreaterEqual(len(lines), 29)
+        self.assertIn("desired=", lines[0])
+        self.assertIn("measured=", lines[0])
+        self.assertIn("voltage=", lines[0])
+        self.assertIn("load=", lines[0])
+        self.assertIn("current_raw=", lines[0])
+        self.assertEqual(bus.speed[WRIST], 8)
+        self.assertEqual(bus.acceleration[WRIST], 3)
+        self.assertIn(("Goal_Speed", TRIAL_GOAL_SPEED), bus.events)
+        self.assertIn(("Acceleration", TRIAL_ACCELERATION), bus.events)
+        self.assertEqual(bus.events[-4][0], "Goal_Position")
+        self.assertEqual(bus.events[-3:-1], [("Goal_Speed", 8), ("Acceleration", 3)])
         self.assertGreaterEqual(result["elapsed_s"], DURATION_S)
         self.assertLess(result["elapsed_s"], DURATION_S + 0.051)
         self.assertGreater(result["writes"], 200)
@@ -135,6 +167,8 @@ class WristShakeTests(unittest.TestCase):
         self.assertEqual(bus.writes[-1], bus.positions)
         self.assertEqual(bus.disconnects, [False])
         self.assertTrue(all(bus.torque.values()))
+        self.assertEqual(bus.speed[WRIST], 8)
+        self.assertEqual(bus.acceleration[WRIST], 3)
 
     def test_fault_and_high_load_stop(self):
         for field, value, message in (("status", 32, "servo fault"), ("load", 901, "high load")):
@@ -149,6 +183,38 @@ class WristShakeTests(unittest.TestCase):
                 self._run(bus)
             self.assertEqual(bus.writes[-1], bus.positions)
             self.assertEqual(bus.disconnects, [False])
+            self.assertEqual(bus.speed[WRIST], 8)
+            self.assertEqual(bus.acceleration[WRIST], 3)
+
+    def test_partial_tuning_failure_restores_saved_registers(self):
+        class PartialBus(FakeBus):
+            def write(self, register, name, value, normalize=True, num_retry=0):
+                if register == "Acceleration" and value == TRIAL_ACCELERATION:
+                    raise OSError("trial tuning write failed")
+                super().write(register, name, value, normalize, num_retry)
+
+        bus = PartialBus("unused")
+        with self.assertRaisesRegex(OSError, "trial tuning write failed"):
+            self._run(bus)
+        self.assertEqual(bus.speed[WRIST], 8)
+        self.assertEqual(bus.acceleration[WRIST], 3)
+        self.assertEqual(bus.writes[-1], bus.positions)
+        self.assertEqual(bus.disconnects, [False])
+
+    def test_tuning_readback_mismatch_stops_before_oscillation(self):
+        class MismatchBus(FakeBus):
+            def write(self, register, name, value, normalize=True, num_retry=0):
+                if register == "Goal_Speed" and value == TRIAL_GOAL_SPEED:
+                    return
+                super().write(register, name, value, normalize, num_retry)
+
+        bus = MismatchBus("unused")
+        with self.assertRaisesRegex(ShakeSafetyError, "Goal_Speed readback mismatch"):
+            self._run(bus)
+        self.assertEqual(bus.speed[WRIST], 8)
+        self.assertEqual(bus.acceleration[WRIST], 3)
+        self.assertEqual(len(bus.writes), 2)  # initial hold and final measured hold
+        self.assertEqual(bus.disconnects, [False])
 
     def test_owner_check_blocks_before_connect(self):
         bus = FakeBus("unused")

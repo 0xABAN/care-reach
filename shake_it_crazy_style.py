@@ -29,6 +29,9 @@ LEAD_TICKS = 65
 MAX_TRACKING_ERROR = 110
 MAX_LOAD = 900
 MIN_VOLTAGE_RAW = 48
+TRIAL_GOAL_SPEED = 20
+TRIAL_ACCELERATION = 10
+TELEMETRY_PERIOD_S = 0.5
 PORT = "/dev/serial/by-id/usb-1a86_USB_Single_Serial_5B79078563-if00"
 
 
@@ -73,6 +76,7 @@ class WristShake:
         self.last_positions: dict[str, int] | None = None
         self.firmware_min: dict[str, int] | None = None
         self.firmware_max: dict[str, int] | None = None
+        self.saved_tuning: tuple[int, int] | None = None
 
     def _read(self, register: str) -> dict[str, int]:
         assert self.bus is not None
@@ -80,6 +84,38 @@ class WristShake:
         if set(values) != set(JOINT_NAMES):
             raise ShakeSafetyError(f"incomplete {register} read")
         return {name: int(values[name]) for name in JOINT_NAMES}
+
+    def _read_one(self, register: str) -> int:
+        assert self.bus is not None
+        return int(self.bus.read(register, WRIST, normalize=False, num_retry=2))
+
+    def _write_one(self, register: str, value: int) -> None:
+        assert self.bus is not None
+        self.bus.write(register, WRIST, value, normalize=False, num_retry=2)
+
+    def _set_trial_tuning(self) -> None:
+        # Both values are captured before the first mutation, so a partial
+        # write can still be undone in finally.
+        self.saved_tuning = (self._read_one("Goal_Speed"), self._read_one("Acceleration"))
+        for register, value in (("Goal_Speed", TRIAL_GOAL_SPEED),
+                                ("Acceleration", TRIAL_ACCELERATION)):
+            self._write_one(register, value)
+            if self._read_one(register) != value:
+                raise ShakeSafetyError(f"{WRIST}: {register} readback mismatch")
+
+    def _restore_tuning(self) -> None:
+        if self.saved_tuning is None:
+            return
+        errors = []
+        for register, value in zip(("Goal_Speed", "Acceleration"), self.saved_tuning, strict=True):
+            try:
+                self._write_one(register, value)
+                if self._read_one(register) != value:
+                    errors.append(f"{register} readback mismatch")
+            except Exception as exc:
+                errors.append(f"{register}: {exc}")
+        if errors:
+            raise ShakeSafetyError(f"{WRIST}: tuning restore failed: {'; '.join(errors)}")
 
     def _sample(self) -> dict[str, dict[str, int]]:
         fields = {field: self._read(register) for field, register in (
@@ -158,8 +194,10 @@ class WristShake:
             home_hold = {name: initial[name]["position"] for name in JOINT_NAMES if name != WRIST}
             self.started = True
             self.bus.sync_write("Goal_Position", {**home_hold, WRIST: initial[WRIST]["position"]}, normalize=False)
+            self._set_trial_tuning()
             start = self.clock.monotonic()
             next_sample = start
+            next_log = 0.0
             while True:
                 state = self._sample()
                 self._check(state)
@@ -169,6 +207,12 @@ class WristShake:
                     break
                 desired = HOME[WRIST_INDEX] + waveform(elapsed)
                 measured = state[WRIST]["position"]
+                if elapsed + 1e-9 >= next_log:
+                    current = self._read_one("Present_Current")
+                    print(f"shake t={elapsed:.2f}s desired={desired} measured={measured} "
+                          f"voltage={state[WRIST]['voltage'] / 10:.1f}V "
+                          f"load={state[WRIST]['load']} current_raw={current}", flush=True)
+                    next_log = (math.floor(elapsed / TELEMETRY_PERIOD_S) + 1) * TELEMETRY_PERIOD_S
                 if abs(desired - measured) > MAX_TRACKING_ERROR:
                     raise ShakeSafetyError(f"{WRIST}: tracking error {abs(desired - measured)} ticks")
                 goal = measured + max(-LEAD_TICKS, min(LEAD_TICKS, desired - measured))
@@ -184,7 +228,10 @@ class WristShake:
         finally:
             if self.connected:
                 try:
-                    self._hold()
+                    try:
+                        self._hold()
+                    finally:
+                        self._restore_tuning()
                 finally:
                     assert self.bus is not None
                     self.bus.disconnect(disable_torque=False)
