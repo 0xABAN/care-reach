@@ -38,9 +38,12 @@ The `care_reach` package is organized by responsibility, from pure planning outw
 | `care_reach/motion/` | Safety bounds (`bounds.py`), blended trajectory planning (`trajectory.py`), and calibrated FK/IK (`kinematics.py`). Never touches hardware. |
 | `care_reach/policy.py` | Converts and splices model (VLA) actions into validated tick poses. Not yet wired to a live policy. |
 | `care_reach/hardware/` | Shared bus access and live guards (`bus.py`), trajectory playback from Home (`arm_runtime.py`), and a measured-feedback pose move (`measured_pose_runner.py`). Only `bus.py` imports LeRobot. |
-| `care_reach/routines/` | Command-line motions: `home`, `park`, and `dance`. Park and dance plan offline and open the bus only with `--execute`; home always moves. Without `--port`, they find the URT-2 by its USB ID. |
+| `care_reach/vision/` | Wrist camera pictures from the Pi's camera service (`camera.py`) and the Grounding DINO client (`detector.py`). Never moves the arm. |
+| `care_reach/pick/` | Centering the jaws over a named object: setup record (`config.py`), level nudges in meters (`arm.py`), and the look-and-nudge loop (`center.py`). See [centering](docs/PICK.md). |
+| `care_reach/inference/` | The Grounding DINO HTTP server for the GPU pod. Never runs on the Pi. |
+| `care_reach/routines/` | Command-line motions: `home`, `park`, `dance`, `center`, and the one-time `pick_setup`. Park, dance, and center run offline or look only, and open the bus only with `--execute`; home and `pick_setup direction` always move. Without `--port`, they find the URT-2 by its USB ID. |
 | `care_reach/dashboard/` | The control panel: bus-owning controller for jogs and Home/Fold/Dance moves (`panel.py`) and its HTTP server (`server.py`). |
-| `config/` | This arm's joint settings, folded pose, calibration backup, and LeRobot patch. |
+| `config/` | This arm's joint settings, folded pose, calibration backup, LeRobot patch, and the `pick.json` that `pick_setup` writes. |
 
 Run every command from the checkout root with `python -m`, so Python finds the package.
 

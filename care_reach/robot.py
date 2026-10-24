@@ -33,6 +33,12 @@ JOINT_SETTINGS_PATH = CONFIG_DIR / "joint_settings.json"
 # Lance's hand-folded pose, recorded as raw encoder ticks.
 FOLDED_POSE_PATH = CONFIG_DIR / "folded_pose.json"
 
+# The survey pose, aim point, and camera directions that `pick_setup` records.
+PICK_CONFIG_PATH = CONFIG_DIR / "pick.json"
+
+# The official SO-101 model cached on the Pi; see docs/KINEMATICS.md.
+SO101_URDF_PATH = Path.home() / ".cache/care-reach/so101-model/so101_new_calib.urdf"
+
 # LeRobot reads and writes the active calibration here. A versioned recovery
 # copy lives at config/care_reach_follower.json; never overwrite one blindly.
 CALIBRATION_PATH = (
