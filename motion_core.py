@@ -142,65 +142,6 @@ def action_to_ticks(
     return validate_pose(ticks, bounds)
 
 
-def quintic_segment(
-    start6: Sequence[int],
-    end6: Sequence[int],
-    vmax6: Sequence[float],
-    amax6: Sequence[float],
-    fps: float = 20,
-) -> list[tuple[int, ...]]:
-    """Sample a synchronized quintic with zero endpoint speed/acceleration.
-
-    The normalized curve is 10u^3 - 15u^4 + 6u^5. Its peak normalized speed
-    is 1.875 and peak acceleration is 10/sqrt(3), approximately 5.774.
-    Quantization can repeat ticks; actual actuator behavior is not modeled.
-    """
-    start = _six_ticks(start6, "start")
-    end = _six_ticks(end6, "end")
-    vmax = _six_positive(vmax6, "vmax")
-    amax = _six_positive(amax6, "amax")
-    if not isinstance(fps, Real) or isinstance(fps, bool) or not math.isfinite(fps) or fps <= 0:
-        raise ValueError("fps must be finite and positive")
-    delta = tuple(stop - begin for begin, stop in zip(start, end))
-    if all(distance == 0 for distance in delta):
-        return [start]
-    duration = max(
-        1 / fps,
-        *(1.875 * abs(distance) / speed for distance, speed in zip(delta, vmax)),
-        *(math.sqrt(5.774 * abs(distance) / acceleration)
-          for distance, acceleration in zip(delta, amax)),
-    )
-    steps = math.ceil(duration * fps)
-    frames = []
-    for step in range(steps + 1):
-        u = step / steps
-        blend = u**3 * (10 + u * (-15 + 6 * u))
-        frames.append(tuple(round(begin + distance * blend) for begin, distance in zip(start, delta)))
-    frames[0] = start
-    frames[-1] = end
-    return frames
-
-
-def plan_waypoints(
-    start: Sequence[int],
-    waypoints: Sequence[Sequence[int]],
-    bounds: SafetyBounds,
-    vmax: Sequence[float],
-    amax: Sequence[float],
-    fps: float = 20,
-) -> list[tuple[int, ...]]:
-    """Join safe quintic segments, preserving one copy of each waypoint."""
-    previous = validate_pose(start, bounds)
-    frames = [previous]
-    for waypoint in waypoints:
-        target = validate_pose(waypoint, bounds)
-        segment = quintic_segment(previous, target, vmax, amax, fps)
-        for pose in segment[1:]:
-            frames.append(validate_pose(pose, bounds))
-        previous = target
-    return frames
-
-
 def _segment_limits(
     limits: Sequence[float] | Sequence[Sequence[float]],
     count: int,

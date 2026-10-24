@@ -55,8 +55,7 @@ class ParkTests(unittest.TestCase):
         self.assertEqual(validate_pose(target, task_bounds), target)
 
     def test_fold_moves_loaded_joints_together_inside_bounds(self):
-        target, frames = build_plan(self.bounds, self.pose_path)
-        task_bounds = folded_bounds(self.bounds, target)
+        target, task_bounds, frames = build_plan(self.bounds, self.pose_path)
         self.assertEqual(frames[0], HOME)
         self.assertEqual(frames[-1], target)
         self.assertTrue(all(validate_pose(frame, task_bounds) == frame for frame in frames))

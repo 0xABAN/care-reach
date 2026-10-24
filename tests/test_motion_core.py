@@ -7,8 +7,7 @@ from pathlib import Path
 
 from motion_core import (
     JOINT_NAMES, SafetyBounds, UnsafePoseError, action_to_ticks,
-    plan_blended_waypoints, plan_waypoints, quintic_segment, splice_action_chunk,
-    validate_pose,
+    plan_blended_waypoints, splice_action_chunk, validate_pose,
 )
 
 
@@ -54,31 +53,6 @@ class MotionCoreTests(unittest.TestCase):
             action_to_ticks((0, 0, 0, 0, 0, 0), self.calibration, self.bounds)
         with self.assertRaisesRegex(UnsafePoseError, "gripper action"):
             action_to_ticks((0, 0, 0, 0, 0, 101), self.calibration, self.bounds)
-
-    def test_synchronized_quintic_respects_limits_and_has_gentle_ends(self):
-        start = (2000,) * 6
-        end = (2100, 1900, 2000, 2000, 2000, 2000)
-        frames = quintic_segment(start, end, (200,) * 6, (500,) * 6, fps=20)
-        self.assertEqual(frames[0], start)
-        self.assertEqual(frames[-1], end)
-        self.assertGreaterEqual((len(frames) - 1) / 20, (5.774 * 100 / 500) ** 0.5)
-        self.assertTrue(all(a[0] <= b[0] and a[1] >= b[1] for a, b in zip(frames, frames[1:])))
-        self.assertTrue(all(frame[2:] == (2000, 2000, 2000, 2000) for frame in frames))
-        gaps = [b[0] - a[0] for a, b in zip(frames, frames[1:])]
-        self.assertLess(gaps[0], max(gaps))
-        self.assertLess(gaps[-1], max(gaps))
-
-    def test_waypoint_planner_rejects_unsafe_destination(self):
-        home = (2000,) * 6
-        safe = (2050, 2000, 2000, 2000, 2050, 2000)
-        frames = plan_waypoints(home, [safe, home], self.bounds, [200] * 6, [500] * 6)
-        self.assertEqual(frames[0], home)
-        self.assertEqual(frames[-1], home)
-        self.assertIn(safe, frames)
-        self.assertTrue(all(validate_pose(frame, self.bounds) == frame for frame in frames))
-        with self.assertRaisesRegex(UnsafePoseError, "motor 5"):
-            plan_waypoints(home, [safe, (2000, 2000, 2000, 2000, 3358, 2000)],
-                           self.bounds, [200] * 6, [500] * 6)
 
     def test_blended_path_passes_through_waypoints_without_a_full_stop(self):
         home = (2000,) * 6

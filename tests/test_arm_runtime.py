@@ -160,7 +160,6 @@ class RuntimeTests(unittest.TestCase):
             def sync_write(self, register, goals, normalize=True):
                 before = self.positions.copy()
                 super().sync_write(register, goals, normalize)
-                count = len(self.writes)
                 self.positions = before.copy()
                 for name in JOINT_NAMES:
                     if name == "elbow_flex":

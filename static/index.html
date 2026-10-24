@@ -21,8 +21,6 @@
     button:disabled { opacity: .45; cursor: default; }
     .top-actions { display: flex; gap: 8px; }
     .hold-all { background: #235960; border-color: #559aa0; font-weight: 700; white-space: nowrap; }
-    .release { background: #6e2c31; border-color: #ad555a; font-weight: 700; white-space: nowrap; }
-    .release:hover { background: #88373d; }
     .grid { display: grid; gap: 12px; }
     .joint { background: #1c2a32; border: 1px solid #33454f; border-radius: 14px; padding: 17px; display: grid; grid-template-columns: minmax(155px,1.2fr) minmax(215px,1.5fr) minmax(180px,1fr) minmax(245px,1.5fr); gap: 16px; align-items: center; }
     .joint.moving { border-color: #7ed7dc; box-shadow: inset 0 0 0 1px #7ed7dc; }
@@ -54,7 +52,7 @@
   <main>
     <div class="top">
       <div><h1>SO-101 Joint Control</h1><p class="subtitle muted">Hold a direction to move any joint. Release to hold its measured position.</p><p class="subtitle muted" id="folded-pose"></p></div>
-      <div class="top-actions"><button class="hold-all" id="hold-all">Hold all joints</button><button class="release" id="release" disabled title="Set and verify the coiled rest pose first">Torque release unavailable</button></div>
+      <div class="top-actions"><button class="hold-all" id="hold-all">Hold all joints</button></div>
     </div>
     <div id="status" class="status">Connecting to the arm…</div>
     <div id="joints" class="grid"></div>
@@ -181,11 +179,6 @@
         else show(`Moving motor ${press.motor} · release to stop`);
       } catch (error) { show(error.message, true); endPress(); }
     }
-    document.getElementById('release').addEventListener('click', async () => {
-      endPress();
-      try { await api('/api/release', {}); await refresh(); show('All torque released. Support the arm.'); }
-      catch (error) { show(error.message, true); }
-    });
     document.getElementById('hold-all').addEventListener('click', async () => {
       endPress();
       try { await api('/api/hold-all', {}); await refresh(); show('All six joints are holding their current positions.'); }

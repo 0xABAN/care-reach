@@ -14,7 +14,7 @@ import json
 from pathlib import Path
 from typing import Sequence
 
-from motion_core import JOINT_NAMES, SafetyBounds, UnsafePoseError, plan_blended_waypoints, validate_pose
+from motion_core import JOINT_NAMES, SafetyBounds, UnsafePoseError, plan_blended_waypoints
 
 
 HOME = (2000,) * 6
@@ -69,16 +69,18 @@ def build_plan(
     bounds: SafetyBounds,
     pose_path: str | Path = POSE_PATH,
     fps: int = 20,
-) -> tuple[tuple[int, ...], list[tuple[int, ...]]]:
+) -> tuple[tuple[int, ...], SafetyBounds, list[tuple[int, ...]]]:
+    """Plan Home to the recorded fold; return the target, fold bounds, and frames.
+
+    The planner validates Home, the target, and every frame against the fold
+    bounds, so a plan that returns is safe to hand to the measured runner.
+    """
     if not isinstance(fps, int) or isinstance(fps, bool) or not 5 <= fps <= 50:
         raise ValueError("fps must be an integer between 5 and 50")
     target = folded_target(pose_path)
     task_bounds = folded_bounds(bounds, target)
-    validate_pose(HOME, task_bounds)
     frames = plan_blended_waypoints(HOME, (target,), task_bounds, FOLD_VMAX, FOLD_AMAX, fps=fps)
-    if frames[0] != HOME or frames[-1] != target:
-        raise ValueError("fold planner did not reach the recorded endpoint")
-    return target, frames
+    return target, task_bounds, frames
 
 
 def write_plan_csv(path: Path, frames: Sequence[Sequence[int]], fps: int) -> None:
@@ -104,8 +106,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         bounds = SafetyBounds.from_files(args.settings, args.calibration)
-        target, frames = build_plan(bounds, args.pose, fps=args.fps)
-        task_bounds = folded_bounds(bounds, target)
+        target, task_bounds, frames = build_plan(bounds, args.pose, fps=args.fps)
     except (ValueError, OSError) as exc:
         parser.error(str(exc))
 

@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import math
 import os
 import signal
 import threading
@@ -75,7 +74,6 @@ class Arm:
         self.lock = threading.RLock()
         self.settings_path = Path(settings_path)
         self.calibration_path = calibration_path
-        self.pose_path = pose_path
         self.settings = load_settings(self.settings_path)
         self.folded = folded_target(pose_path) if pose_path is not None else folded_target()
         self.bounds = SafetyBounds.from_files(self.settings_path, self.calibration_path)
@@ -422,9 +420,6 @@ class Arm:
                 raise RuntimeError("One or more motors did not enable torque")
             return {"ok": True}
 
-    def release(self):
-        raise ValueError("Torque release is unavailable in this dashboard")
-
     def close(self):
         with self.lock:
             if self.closed:
@@ -536,9 +531,6 @@ def handler_for(arm, port):
                     if type(scale) is not int or scale not in SCALES:
                         raise ValueError("scale must be 1, 2, 4, or 8")
                     result = arm.scale(motor, scale)
-                elif path == "/api/release":
-                    arm.release()
-                    result = {"ok": True}
                 elif path == "/api/hold-all":
                     result = arm.hold_all()
                 else:

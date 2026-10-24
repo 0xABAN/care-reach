@@ -13,7 +13,7 @@ import math
 from pathlib import Path
 from typing import Sequence
 
-from motion_core import JOINT_NAMES, SafetyBounds, plan_blended_waypoints, validate_pose
+from motion_core import JOINT_NAMES, SafetyBounds, plan_blended_waypoints
 
 
 HOME = (2000,) * 6
@@ -77,17 +77,11 @@ def build_plan(
     if fps < 5 or fps > 50:
         raise ValueError("fps must be between 5 and 50")
     waypoints = build_waypoints(scale)
-    validate_pose(HOME, bounds)
-    for _, pose in waypoints:
-        validate_pose(pose, bounds)
+    # The planner validates Home, every waypoint, and every interpolated frame.
     frames = plan_blended_waypoints(
         HOME, [pose for _, pose in waypoints], bounds, PHASE_VMAX, PHASE_AMAX,
         fps=fps, stop_indices=(3, 5),
     )
-    if not frames or tuple(frames[0]) != HOME or tuple(frames[-1]) != HOME:
-        raise ValueError("planner did not return a home-to-home path")
-    for frame in frames:
-        validate_pose(frame, bounds)
     return waypoints, frames
 
 
@@ -105,7 +99,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true", help="plan only (default)")
     mode.add_argument("--execute", action="store_true", help="run on connected arm")
-    parser.add_argument("--routine", choices=("dance",), default="dance")
     parser.add_argument("--scale", type=float, default=0.75)
     parser.add_argument("--fps", type=int, default=20)
     parser.add_argument("--port", default="/dev/cu.usbmodem5B790785631")
@@ -120,7 +113,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (ValueError, OSError) as exc:
         parser.error(str(exc))
 
-    print(f"{args.routine}: {len(frames)} frames, {(len(frames) - 1) / args.fps:.1f}s at {args.fps} Hz, scale {args.scale:g}")
+    print(f"dance: {len(frames)} frames, {(len(frames) - 1) / args.fps:.1f}s at {args.fps} Hz, scale {args.scale:g}")
     for phase, pose in waypoints:
         print(f"  {phase:14} {pose}")
     if args.csv:
