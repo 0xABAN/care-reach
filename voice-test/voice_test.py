@@ -145,6 +145,7 @@ class VoiceTest:
         self.speech: list[bytes] = []
         self.speech_frames = 0
         self.quiet_frames = 0
+        self.silence_frames_required = 45
         self.hot_frames = 0
         self.ui_lock = threading.Lock()
         self.ui = {"status": "Starting", "model": MODEL_NAME, "listening": True, "raw": "", "decision": "", "command": "", "latency_ms": None,
@@ -516,7 +517,7 @@ class VoiceTest:
                     self.speech.append(frame)
                     self.speech_frames += 1
                     self.quiet_frames = 0 if hot else self.quiet_frames + 1
-                    if self.quiet_frames >= 45 or self.speech_frames >= 400:
+                    if self.quiet_frames >= self.silence_frames_required or self.speech_frames >= 400:
                         pcm = b"".join(self.speech)
                         self.speech = []
                         self.pre_roll.clear()

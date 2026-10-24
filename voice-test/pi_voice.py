@@ -78,6 +78,7 @@ class PiVoiceTest(VoiceTest):
         self.openrouter_model = model
         self.dashboard_file = ROOT / "pi_dashboard.html"
         self.example_phrase = "open the gripper"
+        self.silence_frames_required = 30
         self.arm_enabled_until = 0.0
         self.arm_enable_status = "Not enabled yet"
         self.command_latency_ms: int | None = None
@@ -118,8 +119,13 @@ class PiVoiceTest(VoiceTest):
 
     def choose_command(self, text: str) -> str | None:
         self.command_latency_ms = None
-        command = None
-        if not self.openrouter_disabled:
+        command = self.local_command(text)
+        if command != "none":
+            self.command_latency_ms = 0
+            self.command_backend = "Local exact phrase (fast path)"
+        else:
+            command = None
+        if command is None and not self.openrouter_disabled:
             try:
                 command, self.command_latency_ms = classify_openrouter(
                     text, self.openrouter_key, self.openrouter_model)

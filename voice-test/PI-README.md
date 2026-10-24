@@ -2,6 +2,8 @@
 
 The Pi uses its USB PnP microphone through FFmpeg ALSA (`hw:2,0`). Cartesia Ink-Whisper transcribes speech; OpenRouter GPT-4.1 Mini selects a command from a fixed allowlist. The dashboard shows mic level, exact transcript, decision, action result, and API times. Labeled trials generate a missed trigger, wrong command, and unwanted activation report.
 
+Exact commands such as **“Hey Arm, open the gripper”** and **“Hey Arm, close the gripper”** use local phrase matching after Cartesia transcription for a faster response. Other wording goes to OpenRouter. The Pi closes a speech segment after 600 ms of silence; the dashboard's response time starts at the end of that segment.
+
 If OpenRouter rejects its key or is unavailable, the page switches to strict local phrase matching and shows that under **Command path**. Replace the key in the protected Pi environment file and restart the service to retry OpenRouter.
 
 The Pi voice page runs on `127.0.0.1:8770`. From the Mac, use an SSH tunnel:
