@@ -19,6 +19,7 @@ class LinearModel:
         return matrix
 
     def inverse_kinematics(self, current, target, **kwargs):
+        self.ik_options = kwargs
         result = np.array(current, dtype=float)
         result[:3] = target[:3, 3] * 1000
         return result
@@ -58,6 +59,8 @@ class KinematicsTests(unittest.TestCase):
         self.assertEqual(result.target_ticks[5], 1760)
         self.assertEqual(result.target_ticks[0], 2214)
         self.assertLess(result.residual_mm, 0.1)
+        solver.translate(start, (0, 0.01, 0), orientation_weight=0)
+        self.assertEqual(solver.model.ik_options["orientation_weight"], 0)
 
     def test_outside_bounds_and_oversized_step_rejected(self):
         solver = self.make()
@@ -67,6 +70,8 @@ class KinematicsTests(unittest.TestCase):
             solver.translate((2000,) * 6, (0.031, 0, 0))
         with self.assertRaises(IKError):
             solver.translate((2000,) * 6, (0.02, 0, 0), max_joint_step_ticks=100)
+        with self.assertRaises(IKError):
+            solver.translate((2000,) * 6, (0.01, 0, 0), orientation_weight=float("nan"))
         with self.assertRaises(IKError):
             solver.translate((2990, 2000, 2000, 2000, 2000, 1800), (0.01, 0, 0))
 

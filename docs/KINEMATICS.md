@@ -38,6 +38,15 @@ the holding goal. A runner stop or fault still holds measured position. Check
 the measured FK result after every leg, since a solved model pose is not proof
 that the servos reached it.
 
+`orientation_weight=0` is available for position-only exploratory steps. Near
+Home, the official 0.01 orientation weight made a 20 mm Z request use large,
+opposing elbow and wrist changes; position-only IK produced a much shorter
+joint move. This setting does not hold the tool angle, so use the orientation
+constraint for tasks that require one. Feedback corrections also need a
+regularized or waypoint-aware solver: repeated Z corrections in the first
+live trial did not converge below about 8 mm and eventually reached the
+joint-jump guard. No automatic Cartesian correction loop is enabled.
+
 This is *local* IK from a measured pose, not a collision-aware path planner.
 The official URDF reports self-collisions even in neutral, and its base
 collision geometry is incomplete. We have not measured the real tool's

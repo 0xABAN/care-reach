@@ -97,6 +97,7 @@ class SO101Kinematics:
         max_step_m: float = 0.03,
         max_joint_step_ticks: int = 250,
         max_residual_mm: float = 3.0,
+        orientation_weight: float = 0.01,
     ) -> IKResult:
         start = validate_pose(start_ticks, self.bounds)
         delta = np.asarray(delta_xyz_m, dtype=float)
@@ -106,6 +107,8 @@ class SO101Kinematics:
             raise IKError("Cartesian step exceeds its configured limit")
         if not 1 <= max_joint_step_ticks <= 500 or max_residual_mm <= 0:
             raise IKError("Invalid IK safety limits")
+        if not math.isfinite(orientation_weight) or not 0 <= orientation_weight <= 1:
+            raise IKError("Orientation weight must be between 0 and 1")
         start_transform = self.forward(start)
         target_transform = start_transform.copy()
         target_transform[:3, 3] += delta
@@ -113,7 +116,7 @@ class SO101Kinematics:
         try:
             solved_deg = self.model.inverse_kinematics(
                 current_deg, target_transform, position_weight=1.0,
-                orientation_weight=0.01, max_iters=12,
+                orientation_weight=orientation_weight, max_iters=12,
             )
             target = self.degrees_to_ticks(np.asarray(solved_deg), start[5])
         except IKError:
