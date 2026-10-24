@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cartesia voice test</title>
+<style>
+  :root { color-scheme: dark; font-family: system-ui, sans-serif; }
+  body { max-width: 850px; margin: 32px auto; padding: 0 20px; background: #111827; color: #f9fafb; }
+  h1 { font-size: 1.8rem; margin-bottom: 4px; }
+  p { color: #cbd5e1; line-height: 1.5; }
+  .badge { display: inline-block; background: #065f46; color: #d1fae5; padding: 5px 10px; border-radius: 999px; font-size: .85rem; }
+  .card { background: #1f2937; border: 1px solid #374151; border-radius: 14px; padding: 18px; margin: 16px 0; }
+  .label { color: #94a3b8; font-size: .82rem; text-transform: uppercase; letter-spacing: .08em; margin-bottom: 7px; }
+  .value { font-size: 1.18rem; min-height: 1.5em; overflow-wrap: anywhere; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(200px,1fr)); gap: 12px; }
+  .grid .card { margin: 0; }
+  button { cursor: pointer; color: #fff; background: #2563eb; border: 0; border-radius: 9px; padding: 11px 14px; margin: 4px 5px 4px 0; font-size: 1rem; }
+  button:hover { background: #1d4ed8; }
+  button:focus-visible { outline: 3px solid #93c5fd; }
+  pre { white-space: pre-wrap; overflow-wrap: anywhere; font: .85rem/1.5 ui-monospace, monospace; color: #d1d5db; max-height: 300px; overflow: auto; }
+  #connection { color: #fca5a5; }
+</style>
+<h1>Cartesia voice test</h1>
+<span class="badge">USB mic · Cartesia cloud transcription · no robot control</span>
+<p>Speech model: <strong id="model">Loading…</strong></p>
+<p>Speech is sent to Cartesia when the Mac detects an utterance. This uses your Cartesia API account.</p>
+<button id="listenButton" onclick="toggleListening()">Pause listening</button>
+  <p>Say <strong>“Hey Arm, pick up the can”</strong> in one phrase. If the screen says <strong>“Wake heard”</strong>, say <strong>“pick up the can”</strong> within 12 seconds.</p>
+<p id="connection"></p>
+<div class="card"><div class="label">Live status</div><div class="value" id="status">Connecting…</div></div>
+<div class="card"><div class="label">USB mic level</div><div class="value" id="level">—</div><p>The number should rise when you speak. Trigger level is the minimum used to detect speech.</p></div>
+<div class="grid">
+  <div class="card"><div class="label">Exact transcription</div><div class="value" id="raw">—</div></div>
+  <div class="card"><div class="label">Decision</div><div class="value" id="decision">—</div></div>
+  <div class="card"><div class="label">API response time</div><div class="value" id="latency">—</div></div>
+</div>
+<div class="card">
+  <div class="label">Check what the mic heard</div>
+  <p>Click, say one phrase, then replay that phrase. The audio stays on this Mac. If the words on screen differ from what you said, check this recording first.</p>
+  <button onclick="diagnostic()">Save next utterance</button>
+  <audio id="audio" controls style="display:none; width:100%; margin-top:12px"></audio>
+</div>
+<div class="card">
+  <div class="label">Score a 90-second trial</div>
+  <p>Click one expected result, then speak. This starts listening if paused. For “No wake word,” talk normally without saying “Hey Arm.”</p>
+  <button onclick="trial('pick_up_can')">Pick up can</button>
+  <button onclick="trial('stop')">Stop</button>
+  <button onclick="trial('cancel')">Cancel</button>
+  <button onclick="trial('none')">No wake word</button>
+  <p id="trial">No trial running.</p>
+</div>
+<div class="card"><div class="label">Test report</div><pre id="report">No trials yet.</pre></div>
+<div class="card"><div class="label">Recent activity</div><pre id="messages"></pre></div>
+<script>
+let lastAudioSequence = 0;
+let listening = true;
+async function toggleListening() {
+  try {
+    const response = await fetch('/listen', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({enabled:!listening})});
+    if (!response.ok) throw new Error('Could not change listening state');
+    listening = !listening;
+    document.getElementById('listenButton').textContent = listening ? 'Pause listening' : 'Start listening';
+  } catch (error) { document.getElementById('connection').textContent = error.message; }
+}
+async function diagnostic() {
+  try {
+    const response = await fetch('/diagnostic', {method:'POST'});
+    if (!response.ok) throw new Error('Could not start audio check');
+  } catch (error) { document.getElementById('connection').textContent = error.message; }
+}
+async function trial(expected) {
+  try {
+    const response = await fetch('/trial', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({expected})});
+    if (!response.ok) throw new Error('Could not start trial');
+  } catch (error) { document.getElementById('connection').textContent = error.message; }
+}
+async function refresh() {
+  try {
+    const response = await fetch('/state', {cache:'no-store'});
+    if (!response.ok) throw new Error('Voice tester is not running');
+    const state = await response.json();
+    listening = state.listening;
+    document.getElementById('listenButton').textContent = listening ? 'Pause listening' : 'Start listening';
+    document.getElementById('connection').textContent = '';
+    document.getElementById('status').textContent = state.status;
+    document.getElementById('model').textContent = state.model || 'Unknown';
+    document.getElementById('level').textContent = `${state.mic_level}  (trigger: ${state.trigger_level})`;
+    document.getElementById('raw').textContent = state.raw || '—';
+    document.getElementById('decision').textContent = state.command ? `${state.decision}: ${state.command}` : (state.decision || '—');
+    document.getElementById('latency').textContent = state.latency_ms == null ? '—' : `${state.latency_ms} ms`;
+    document.getElementById('trial').textContent = state.trial || 'No trial running.';
+    document.getElementById('report').textContent = state.report;
+    document.getElementById('messages').textContent = state.messages.slice(-14).join('\n');
+    if (state.audio_sequence > lastAudioSequence) {
+      lastAudioSequence = state.audio_sequence;
+      const audio = document.getElementById('audio');
+      audio.src = `/last-utterance.wav?v=${lastAudioSequence}`;
+      audio.style.display = 'block';
+    }
+  } catch (error) { document.getElementById('connection').textContent = error.message; }
+}
+refresh(); setInterval(refresh, 700);
+</script>
+</html>
