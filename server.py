@@ -430,6 +430,8 @@ class Arm:
                 hold["bounds"] = self.bounds
                 hold["frame_index"] = 0
                 hold["last_goals"] = dict(zip(JOINT_NAMES, HOME, strict=True))
+                hold["temperatures"] = {name: snapshot[name]["temperature"] for name in JOINT_NAMES}
+                hold["temperature_at"] = now
                 hold["progress"] = .05
                 hold["next"] = now + 1 / DANCE_FPS
                 hold["expires"] = now + max(180, len(hold["dance_frames"]) * .15)
@@ -473,7 +475,19 @@ class Arm:
 
     def _advance_dance(self, now):
         hold = self.hold
-        snapshot = self._snapshot()
+        fields = {label: self._read(register) for label, register in (
+            ("position", "Present_Position"), ("status", "Status"),
+            ("torque", "Torque_Enable"), ("voltage", "Present_Voltage"),
+            ("load", "Present_Load"),
+        )}
+        if now - hold["temperature_at"] >= 1.0:
+            hold["temperatures"] = self._read("Present_Temperature")
+            hold["temperature_at"] = now
+        snapshot = {
+            name: {**{label: values[name] for label, values in fields.items()},
+                   "temperature": hold["temperatures"][name]}
+            for name in JOINT_NAMES
+        }
         self._check_snapshot(snapshot, bounds=self.bounds, overshoot=POSE_MEASURED_OVERSHOOT)
         positions = {name: snapshot[name]["position"] for name in JOINT_NAMES}
         hold["measured"] = positions
@@ -603,7 +617,8 @@ class Arm:
 
     def _worker(self):
         while not self.closed:
-            time.sleep(0.02)
+            active = self.hold
+            time.sleep(0.005 if active is not None and active.get("stage") == "playback" else 0.02)
             with self.lock:
                 if self.hold is None:
                     continue
