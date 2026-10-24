@@ -60,7 +60,7 @@ def classify(text: str) -> str | None:
 
 def split_wake(text: str) -> tuple[bool, str]:
     words = normalize(text)
-    for phrase in ("hey arm", "hey um"):
+    for phrase in ("hey arm", "hey um", "hey aam", "hey ahm", "hey im", "hey i m"):
         if words == phrase:
             return True, ""
         if words.startswith(phrase + " "):
@@ -412,7 +412,8 @@ class VoiceTest:
             if self.trial:
                 self.trial.wake_seen = True
             decision = "wake_detected"
-            match = "Approximate Hey Arm match" if normalize(raw).startswith("hey um") else "Hey Arm detected"
+            match = ("Hey Arm detected" if normalize(raw).startswith("hey arm")
+                     else "Approximate Hey Arm match")
             self.print(f"[wake] {match}. Next command within {WAKE_SECONDS}s.")
         if wake or armed:
             candidate = remainder if wake else normalize(raw)

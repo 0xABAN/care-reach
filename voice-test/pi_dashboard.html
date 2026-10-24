@@ -33,6 +33,7 @@
   <button onclick="setArm(true)">Enable one gripper move</button>
   <button onclick="setArm(false)">Disable arm action</button>
   <div class="value" id="arm">Dry run</div>
+  <p id="armEvent">Not enabled yet.</p>
 </div>
 <p id="connection"></p>
 <div class="card"><div class="label">Live status</div><div class="value" id="status">Connecting…</div></div>
@@ -111,6 +112,7 @@ async function refresh() {
     document.getElementById('action').textContent = state.action || '—';
     document.getElementById('lastCommand').textContent = state.last_command ? `${state.last_command_time}: ${state.last_command_raw} → ${state.last_command}` : '—';
     document.getElementById('arm').textContent = state.arm_seconds_left > 0 ? `Enabled for ${state.arm_seconds_left} more seconds` : 'Dry run';
+    document.getElementById('armEvent').textContent = state.arm_enable_status || 'Not enabled yet.';
     document.getElementById('trial').textContent = state.trial || 'No trial running.';
     document.getElementById('report').textContent = state.report;
     document.getElementById('messages').textContent = state.messages.slice(-14).join('\n');

@@ -8,11 +8,12 @@ import json
 import os
 import re
 import time
+from datetime import datetime
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from voice_test import ROOT, VoiceTest, normalize
+from voice_test import REPORTS, ROOT, VoiceTest, normalize, write_row
 
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
@@ -78,6 +79,7 @@ class PiVoiceTest(VoiceTest):
         self.dashboard_file = ROOT / "pi_dashboard.html"
         self.example_phrase = "open the gripper"
         self.arm_enabled_until = 0.0
+        self.arm_enable_status = "Not enabled yet"
         self.command_latency_ms: int | None = None
         self.openrouter_disabled = os.environ.get("OPENROUTER_DISABLED") == "1"
         self.command_backend = ("Local exact phrases (OpenRouter key rejected)"
@@ -86,8 +88,13 @@ class PiVoiceTest(VoiceTest):
         self.ui["action"] = ""
 
     def extra_state(self) -> dict:
+        seconds_left = max(0, round(self.arm_enabled_until - time.monotonic()))
+        enable_status = self.arm_enable_status
+        if self.arm_enabled_until and not seconds_left:
+            enable_status += " (expired)"
         return {
-            "arm_seconds_left": max(0, round(self.arm_enabled_until - time.monotonic())),
+            "arm_seconds_left": seconds_left,
+            "arm_enable_status": enable_status,
             "command_latency_ms": self.command_latency_ms,
             "command_backend": self.command_backend,
         }
@@ -100,9 +107,13 @@ class PiVoiceTest(VoiceTest):
                        for m in motors):
                 raise ValueError("Gripper is not ready")
             self.arm_enabled_until = time.monotonic() + MOTION_WINDOW_SECONDS
+            self.arm_enable_status = f"Enabled at {datetime.now().astimezone().strftime('%H:%M:%S')} for one move"
+            write_row(REPORTS / "arm-enables.csv", ["time", "event"], {
+                "time": datetime.now().astimezone().isoformat(timespec="seconds"), "event": "enabled"})
             self.print(f"[arm] One gripper move enabled for {MOTION_WINDOW_SECONDS} seconds.")
         else:
             self.arm_enabled_until = 0.0
+            self.arm_enable_status = "Disabled manually"
             self.print("[arm] Motion disabled. Voice decisions remain visible.")
 
     def choose_command(self, text: str) -> str | None:
@@ -176,12 +187,14 @@ class PiVoiceTest(VoiceTest):
             return "Not executed: can position and grasp plan are not available"
         if command == "cancel":
             self.arm_enabled_until = 0.0
+            self.arm_enable_status = "Disabled by cancel"
             return "Pending gripper action disabled"
         if command == "stop":
             try:
                 request_json(f"{ROBOT_URL}/api/hold/stop", {}, timeout=5)
                 request_json(f"{ROBOT_URL}/api/pose/stop", {}, timeout=5)
                 self.arm_enabled_until = 0.0
+                self.arm_enable_status = "Disabled by stop"
                 return "Stop sent to arm controller"
             except (HTTPError, URLError, TimeoutError, ValueError) as exc:
                 return f"Stop failed: {type(exc).__name__}"
@@ -190,6 +203,7 @@ class PiVoiceTest(VoiceTest):
         if time.monotonic() >= self.arm_enabled_until:
             return "Dry run: enable arm action in this page for a 60-second test"
         self.arm_enabled_until = 0.0  # One physical action per enable.
+        self.arm_enable_status = "Enable used for one gripper command"
         try:
             state = request_json(f"{ROBOT_URL}/api/state", timeout=5)
             if state.get("holding") is not None or state.get("pose", {}).get("active"):
@@ -205,7 +219,7 @@ class PiVoiceTest(VoiceTest):
                 target = max(gripper["position"] - 120, gripper["effective_lower"])
                 distance = gripper["position"] - target
                 direction = "Closing"
-            if distance < 25:
+            if distance < 50:
                 return "Not executed: gripper is already near that limit"
             request_json(f"{ROBOT_URL}/api/motor6/go", {"target": target}, timeout=5)
             return f"{direction} gripper to tick {target} (120 tick maximum)"
