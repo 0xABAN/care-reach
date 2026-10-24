@@ -7,10 +7,8 @@ import argparse
 import json
 import os
 import re
-import tempfile
 import threading
 import time
-from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -175,30 +173,12 @@ class PiVoiceTest(VoiceTest):
         self.ui["stt_mode"] = stt_mode
         self.ui["action"] = ""
         self.toggle_lock = threading.Lock()
-        self.listening_state_file = Path(os.environ.get(
-            "CARE_REACH_VOICE_LISTENING_STATE",
-            str(Path.home() / ".config/care-reach/voice-listening.json")))
-        try:
-            saved = json.loads(self.listening_state_file.read_text())
-            self.listening = saved["enabled"] is True
-        except FileNotFoundError:
-            pass
-        except (OSError, ValueError, KeyError, TypeError):
-            self.listening = False  # Invalid saved state must not resume paid streaming.
-        self.ui["listening"] = self.listening
+        self.listening = False
+        self.ui["listening"] = False
 
     def set_listening(self, enabled: bool) -> None:
         with self.toggle_lock:
             super().set_listening(enabled)
-            try:
-                self.listening_state_file.parent.mkdir(parents=True, exist_ok=True)
-                with tempfile.NamedTemporaryFile("w", dir=self.listening_state_file.parent,
-                                                 prefix=".voice-listening-", delete=False) as state:
-                    json.dump({"enabled": enabled}, state)
-                    temp_path = state.name
-                os.replace(temp_path, self.listening_state_file)
-            except OSError as error:
-                self.print(f"[error] Could not persist listening setting ({type(error).__name__}).")
 
     def parse_wake(self, text: str) -> tuple[bool, str]:
         words = normalize(text)

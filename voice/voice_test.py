@@ -725,8 +725,11 @@ class VoiceTest:
         report()
         self.start_web(port)
         self.start_capture()
-        self.print(f"[status] Starting USB microphone ({self.backend} device {self.device}); speech is sent to Cartesia")
-        self.print(f"[status] Waiting for 'Hey Arm'... Speak 'Hey Arm, {self.example_phrase}'.")
+        if self.listening:
+            self.print(f"[status] Starting USB microphone ({self.backend} device {self.device}); speech is sent to Cartesia")
+            self.print(f"[status] Waiting for 'Hey Arm'... Speak 'Hey Arm, {self.example_phrase}'.")
+        else:
+            self.print("[status] Transcription paused. No audio sent to Cartesia; enable listening in the dashboard.")
         self.print("[help] For scored trials type: test open_gripper | test close_gripper | test pick_up_can | test cancel | test stop | test none")
         self.print("[help] Type report for counts, quit to stop.")
         try:

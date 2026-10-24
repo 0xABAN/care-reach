@@ -1,11 +1,9 @@
 """No-network checks for streaming dispatch and voice wake gating."""
 
 import sys
-import tempfile
 import time
 import types
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
 from pi_voice import MODEL, PiVoiceTest
@@ -19,11 +17,9 @@ class StreamingDispatchTest(unittest.TestCase):
         self.cartesia_patch.start()
         self.rows_patch = patch("voice_test.write_row")
         self.rows_patch.start()
-        self.state_dir = tempfile.TemporaryDirectory()
-        self.state_patch = patch.dict("os.environ", {
-            "CARE_REACH_VOICE_LISTENING_STATE": str(Path(self.state_dir.name) / "listening.json")})
-        self.state_patch.start()
         self.app = PiVoiceTest("fake", "cartesia-key", "openrouter-key", MODEL)
+        self.app.listening = True  # Most dispatch tests exercise explicitly enabled listening.
+        self.app.ui["listening"] = True
         self.app.streaming_active = True
         self.jev_patch = patch("pi_voice.classify_jev",
                                side_effect=lambda text, key, model: (self.app.local_command(text), 0))
@@ -46,8 +42,6 @@ class StreamingDispatchTest(unittest.TestCase):
     def tearDown(self):
         self.jev_patch.stop()
         self.rows_patch.stop()
-        self.state_patch.stop()
-        self.state_dir.cleanup()
         self.cartesia_patch.stop()
 
     def final_turn(self, phrase="Hey Arm open the gripper"):
@@ -124,13 +118,26 @@ class StreamingDispatchTest(unittest.TestCase):
         self.app._stream_turn(self.app.stream_generation - 1, "Hey Arm dance", {})
         self.assertTrue(self.app.transcript_queue.empty())
 
-    def test_listening_off_survives_service_restart(self):
-        self.app.streaming_stt = types.SimpleNamespace(close=lambda: None)
-        self.app.set_listening(False)
+    def test_listening_is_off_on_every_service_start(self):
         restarted = PiVoiceTest("fake", "cartesia-key", "openrouter-key", MODEL)
         self.assertFalse(restarted.listening)
         self.assertFalse(restarted.ui["listening"])
         self.assertFalse(restarted.streaming_active)
+        self.app.listening = True  # Simulate a prior service session left ON.
+        second_start = PiVoiceTest("fake", "cartesia-key", "openrouter-key", MODEL)
+        self.assertFalse(second_start.listening)
+        with patch.dict(sys.modules, {"streaming_stt": types.SimpleNamespace(
+                StreamingSTT=lambda *args, **kwargs: self.fail("opened Cartesia while OFF"))}), \
+             patch("voice_test.subprocess.Popen"), patch("voice_test.threading.Thread"):
+            second_start.start_capture()
+        second_start.stop.set()
+        with patch.object(second_start, "start_web"), patch.object(second_start, "start_capture"), \
+             patch("voice_test.report", return_value=""), \
+             patch.object(second_start, "print") as status:
+            second_start.run(9999)
+        startup_lines = [call.args[0] for call in status.call_args_list]
+        self.assertTrue(any("Transcription paused" in line for line in startup_lines))
+        self.assertFalse(any("speech is sent to Cartesia" in line for line in startup_lines))
 
     def test_stream_failure_falls_back_to_batch(self):
         self.app.on_streaming_turn("Hey Arm open the gripper", {"turn_ms": 1000})
