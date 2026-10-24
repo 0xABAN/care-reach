@@ -16,6 +16,8 @@ The dashboard runs headless on the Pi and binds `0.0.0.0:8765`. Install it with 
 
 Only **one process** may own the serial bus. Before a standalone dance, park, or other CLI motion, stop the panel on the Pi with `systemctl --user stop care-reach-dashboard.service`; restart it afterward with `systemctl --user start care-reach-dashboard.service`. The panel's Home, Fold, and Dance buttons use that same bus owner. Home targets `(2000,)*6` ticks and Fold targets the recorded folded pose with its narrow recorded exceptions for motors 2 and 3. Dance moves to Home first, plays the full-scale synchronized plan, and settles at Home. Each move monitors bounds, torque, faults, voltage, load, progress, and timeout, with commanded lead at or below 80 ticks per joint. A completed move keeps its exact pose as the holding goal; cancel or fault holds the measured position. Torque stays on. Press the active button again to cancel.
 
+The USB camera's [live feed](docs/CAMERA.md) runs separately on the Pi and is viewable on this Mac at [http://127.0.0.1:8766/](http://127.0.0.1:8766/) through a Tailscale SSH tunnel.
+
 ## Pose names
 
 | Name | Meaning |
