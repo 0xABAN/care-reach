@@ -768,6 +768,9 @@ class HttpHostTests(unittest.TestCase):
         self.assertIn('id="tab-camera"', page)
         self.assertIn('id="camera-panel"', page)
         self.assertIn("'/camera/stream'", page)
+        self.assertIn('id="camera2-feed"', page)
+        self.assertIn("'/camera2/stream'", page)
+        self.assertIn('id="range-card"', page)
 
         class FakeCamera(io.BytesIO):
             headers = {"Content-Type": "multipart/x-mixed-replace;boundary=frame"}
@@ -781,6 +784,31 @@ class HttpHostTests(unittest.TestCase):
         self.assertIn(b"multipart/x-mixed-replace;boundary=frame", headers)
         self.assertEqual(body, b"--frame\r\nJPEG\r\n")
         open_camera.assert_called_once_with("http://127.0.0.1:8766/stream", timeout=5)
+
+    def test_second_camera_stream_and_snapshot_use_separate_service(self):
+        class FakeCamera(io.BytesIO):
+            headers = {"Content-Type": "image/jpeg", "Content-Length": "4"}
+
+        for suffix in ("stream", "snapshot"):
+            with self.subTest(suffix=suffix), patch(
+                "server.urlopen", return_value=FakeCamera(b"JPEG")
+            ) as open_camera:
+                status, (headers, body) = self.call(
+                    self.handler, {"Host": "pi.local:8765"},
+                    path=f"/camera2/{suffix}", parse_json=False,
+                )
+                self.assertEqual(status, 200)
+                self.assertIn(b"image/jpeg", headers)
+                self.assertEqual(body, b"JPEG")
+                open_camera.assert_called_once_with(
+                    f"http://127.0.0.1:8768/{suffix}", timeout=5
+                )
+
+        with patch("server.urlopen", side_effect=OSError("second camera offline")):
+            status, payload = self.call(
+                self.handler, {"Host": "pi.local:8765"}, path="/camera2/stream"
+            )
+        self.assertEqual((status, payload), (503, {"error": "Camera unavailable"}))
 
     def test_camera_unavailable_returns_503(self):
         with patch("server.urlopen", side_effect=OSError("camera offline")):

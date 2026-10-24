@@ -1008,10 +1008,11 @@ def handler_for(arm, port):
             if not self.allowed():
                 return
             path = urlsplit(self.path).path
-            if path in ("/camera/stream", "/camera/snapshot"):
+            if path in ("/camera/stream", "/camera/snapshot", "/camera2/stream", "/camera2/snapshot"):
                 upstream_path = "/stream" if path.endswith("stream") else "/snapshot"
+                camera_port = 8768 if path.startswith("/camera2/") else 8766
                 try:
-                    upstream = urlopen(f"http://127.0.0.1:8766{upstream_path}", timeout=5)
+                    upstream = urlopen(f"http://127.0.0.1:{camera_port}{upstream_path}", timeout=5)
                 except (OSError, URLError) as exc:
                     logging.warning("Camera unavailable: %s", exc)
                     self.reply(503, {"error": "Camera unavailable"})
@@ -1020,7 +1021,7 @@ def handler_for(arm, port):
                     self.send_response(200)
                     self.send_header("Content-Type", upstream.headers.get("Content-Type", "image/jpeg"))
                     self.send_header("Cache-Control", "no-store")
-                    if path == "/camera/snapshot":
+                    if upstream_path == "/snapshot":
                         length = upstream.headers.get("Content-Length")
                         if length:
                             self.send_header("Content-Length", length)

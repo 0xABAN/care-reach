@@ -51,9 +51,13 @@
     [hidden] { display: none !important; }
     .tabs { display: flex; gap: 8px; margin-bottom: 20px; border-bottom: 1px solid #33454f; padding-bottom: 10px; }
     .tabs button[aria-selected="true"] { background: #197f86; border-color: #7ed7dc; font-weight: 700; }
-    .camera-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(240px, 300px); align-items: start; gap: 14px; margin-top: 14px; }
+    .camera-layout { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: 14px; margin-top: 14px; }
+    .camera-card { min-width: 0; }
+    .camera-card h2 { font-size: 1rem; margin: 0 0 8px; }
     .camera-view { display: block; width: 100%; height: auto; background: #1c2a32; border: 1px solid #33454f; border-radius: 14px; }
+    .camera-error { margin: 8px 0 0; }
     .range-card { min-height: 185px; padding: 19px; background: #1c2a32; border: 1px solid #33454f; border-radius: 14px; }
+    .camera-layout .range-card { grid-column: 1 / -1; }
     .range-card[data-state="ok"] { border-color: #559aa0; }
     .range-card[data-state="stale"], .range-card[data-state="error"] { border-color: #bf6268; }
     .range-value { margin: 10px 0 6px; font-size: clamp(2.5rem, 5vw, 4rem); font-weight: 750; letter-spacing: -.045em; line-height: 1; font-variant-numeric: tabular-nums; }
@@ -85,23 +89,32 @@
     <p class="hint muted">Forward increases encoder ticks. Saved joint limits are shown read-only; hold speed is 1×, 2×, 4×, or 8×. Closing the gripper keeps a bounded inward hold when released. Home is the retracted pose; Extend is the camera-safe upright pose. Dance homes first and returns Home. Press an active pose button again to cancel. Torque remains on when a hold ends or this panel closes.</p>
     </section>
     <section id="camera-panel" role="tabpanel" aria-labelledby="tab-camera" hidden>
-      <h1>Live camera</h1>
-      <p class="subtitle muted">Feed from the USB camera connected to the Pi.</p>
+      <h1>Live sensors</h1>
+      <p class="subtitle muted">Both USB cameras and the ultrasonic distance sensor connected to the Pi.</p>
       <div class="camera-layout">
-        <img id="camera-feed" class="camera-view" alt="Live view from the Pi camera">
+        <section class="camera-card" aria-labelledby="camera-heading">
+          <h2 id="camera-heading">Camera 1</h2>
+          <img id="camera-feed" class="camera-view" alt="Live view from Camera 1">
+          <p id="camera-error" class="camera-error muted" role="status" hidden>Camera 1 feed unavailable. Check its service on the Pi.</p>
+        </section>
+        <section class="camera-card" aria-labelledby="camera2-heading">
+          <h2 id="camera2-heading">Camera 2</h2>
+          <img id="camera2-feed" class="camera-view" alt="Live view from Camera 2">
+          <p id="camera2-error" class="camera-error muted" role="status" hidden>Camera 2 feed unavailable. Check its service on the Pi.</p>
+        </section>
         <section id="range-card" class="range-card" data-state="waiting" aria-labelledby="range-heading">
           <div class="group-label" id="range-heading">Ultrasonic distance</div>
           <div class="range-value"><span id="range-value">—</span><span class="range-unit" id="range-unit"></span></div>
           <p class="range-note" id="range-note" role="status">Waiting for sensor data…</p>
         </section>
       </div>
-      <p id="camera-error" class="muted" hidden>Camera feed unavailable. Check the camera service on the Pi.</p>
     </section>
   </main>
   <script>
     const joints = document.getElementById('joints');
     const statusBox = document.getElementById('status');
     const cameraFeed = document.getElementById('camera-feed');
+    const camera2Feed = document.getElementById('camera2-feed');
     const cameraPanel = document.getElementById('camera-panel');
     const rangeCard = document.getElementById('range-card');
     const rangeValue = document.getElementById('range-value');
@@ -139,6 +152,21 @@
       }
     }
 
+    function syncCameraStreams() {
+      const visible = !cameraPanel.hidden && !document.hidden;
+      for (const [feed, path, errorId] of [
+        [cameraFeed, '/camera/stream', 'camera-error'],
+        [camera2Feed, '/camera2/stream', 'camera2-error']
+      ]) {
+        if (visible) {
+          if (!feed.hasAttribute('src')) {
+            document.getElementById(errorId).hidden = true;
+            feed.src = path;
+          }
+        } else feed.removeAttribute('src');
+      }
+    }
+
     function showTab(name) {
       endPress();
       const camera = name === 'camera';
@@ -146,13 +174,14 @@
       cameraPanel.hidden = !camera;
       document.getElementById('tab-controls').setAttribute('aria-selected', String(!camera));
       document.getElementById('tab-camera').setAttribute('aria-selected', String(camera));
-      document.getElementById('camera-error').hidden = true;
-      if (camera) { cameraFeed.src = '/camera/stream'; refreshRange(); }
-      else { cameraFeed.removeAttribute('src'); if (rangeRequest) rangeRequest.abort(); }
+      syncCameraStreams();
+      if (camera) refreshRange();
+      else if (rangeRequest) rangeRequest.abort();
     }
     document.getElementById('tab-controls').addEventListener('click', () => showTab('controls'));
     document.getElementById('tab-camera').addEventListener('click', () => showTab('camera'));
     cameraFeed.addEventListener('error', () => { document.getElementById('camera-error').hidden = false; });
+    camera2Feed.addEventListener('error', () => { document.getElementById('camera2-error').hidden = false; });
     let press = null;
     let rowsBuilt = false;
     let lastState = null;
@@ -366,7 +395,11 @@
     window.addEventListener('blur', endPress);
     window.addEventListener('pointerup', endPress);
     window.addEventListener('pointercancel', endPress);
-    document.addEventListener('visibilitychange', () => { if (document.hidden) endPress(); });
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) { endPress(); if (rangeRequest) rangeRequest.abort(); }
+      else refreshRange();
+      syncCameraStreams();
+    });
     window.addEventListener('pagehide', endPress);
     refresh(); setInterval(refresh, 1000);
     refreshTranscription(); setInterval(refreshTranscription, 2000);
