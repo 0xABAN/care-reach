@@ -41,8 +41,9 @@
   <div class="card"><div class="label">Exact transcription</div><div class="value" id="raw">—</div></div>
   <div class="card"><div class="label">Decision</div><div class="value" id="decision">—</div></div>
   <div class="card"><div class="label">API response time</div><div class="value" id="latency">—</div></div>
-  <div class="card"><div class="label">Action result</div><div class="value" id="action">—</div></div>
+  <div class="card"><div class="label">Last action result</div><div class="value" id="action">—</div></div>
 </div>
+<div class="card"><div class="label">Last accepted command</div><div class="value" id="lastCommand">—</div></div>
 <div class="card">
   <div class="label">Check what the mic heard</div>
   <p>Click, say one phrase, then replay that phrase. The audio stays on the Pi. If the words on screen differ from what you said, check this recording first.</p>
@@ -107,6 +108,7 @@ async function refresh() {
     document.getElementById('decision').textContent = state.command ? `${state.decision}: ${state.command}` : (state.decision || '—');
     document.getElementById('latency').textContent = `Total ${state.total_latency_ms ?? '—'} ms · STT ${state.latency_ms ?? '—'} ms · command ${state.command_latency_ms ?? '—'} ms`;
     document.getElementById('action').textContent = state.action || '—';
+    document.getElementById('lastCommand').textContent = state.last_command ? `${state.last_command_time}: ${state.last_command_raw} → ${state.last_command}` : '—';
     document.getElementById('arm').textContent = state.arm_seconds_left > 0 ? `Enabled for ${state.arm_seconds_left} more seconds` : 'Dry run';
     document.getElementById('trial').textContent = state.trial || 'No trial running.';
     document.getElementById('report').textContent = state.report;

@@ -148,7 +148,8 @@ class VoiceTest:
         self.hot_frames = 0
         self.ui_lock = threading.Lock()
         self.ui = {"status": "Starting", "model": MODEL_NAME, "listening": True, "raw": "", "decision": "", "command": "", "latency_ms": None,
-                   "trial": "", "mic_level": 0, "trigger_level": 0, "audio_sequence": 0}
+                   "trial": "", "mic_level": 0, "trigger_level": 0, "audio_sequence": 0,
+                   "last_command_raw": "", "last_command": "", "action": "", "last_command_time": ""}
         self.messages: deque[str] = deque(maxlen=30)
         self.web: ThreadingHTTPServer | None = None
         self.save_next_audio = False
@@ -425,7 +426,15 @@ class VoiceTest:
         self.print(f"[decision] {decision}" + (f": {command}" if command else "") + f" | response {total_latency_ms} ms" + (f" | action: {action}" if action else ""))
         with self.ui_lock:
             self.ui.update(raw=raw or "(nothing)", decision=decision, command=command,
-                           latency_ms=latency_ms, total_latency_ms=total_latency_ms, action=action)
+                           latency_ms=latency_ms, total_latency_ms=total_latency_ms)
+            if command:
+                self.ui.update(last_command_raw=raw, last_command=command, action=action,
+                               last_command_time=datetime.now().astimezone().isoformat(timespec="seconds"))
+        if command:
+            write_row(REPORTS / "actions.csv", ["time", "raw_text", "command", "action", "latency_ms"], {
+                "time": datetime.now().astimezone().isoformat(timespec="seconds"),
+                "raw_text": raw, "command": command, "action": action, "latency_ms": total_latency_ms,
+            })
         write_row(self.events_path, EVENT_FIELDS, {
             "time": datetime.now().astimezone().isoformat(timespec="seconds"),
             "trial_id": self.trial.id if self.trial else "", "raw_text": raw,
