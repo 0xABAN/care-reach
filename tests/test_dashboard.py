@@ -489,6 +489,16 @@ class PoseTests(DashboardBase):
         with self.assertRaisesRegex(RuntimeError, "torque is off"):
             arm.pose_start("home")
 
+    def test_voltage_status_is_named_and_stops_motion(self):
+        bus = FakeBus((2000,) * 6)
+        arm = self.arm(bus)
+        bus.status["gripper"] = 1
+        self.assertIn("Voltage alarm", arm.state()["motors"][5]["fault"])
+        with self.assertRaisesRegex(RuntimeError, "Motor 6 voltage alarm"):
+            arm.pose_start("dance")
+        self.assertIsNone(arm.hold)
+        self.assertTrue(all(value == 1 for value in bus.torque.values()))
+
     def test_home_target_outside_envelope_is_rejected(self):
         bus = FakeBus((2000,) * 6)
         arm = self.arm(bus)

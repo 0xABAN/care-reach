@@ -169,6 +169,8 @@ class Arm:
         for index, name in enumerate(JOINT_NAMES):
             joint = snapshot[name]
             if joint["status"] != 0:
+                if joint["status"] == 1:
+                    raise RuntimeError(f"Motor {index + 1} voltage alarm (servo status 1)")
                 raise RuntimeError(f"Motor {index + 1} servo fault {joint['status']}")
             if need_torque and joint["torque"] != 1:
                 raise RuntimeError(f"Motor {index + 1} torque is off; use Hold all joints first")
@@ -269,7 +271,8 @@ class Arm:
                     low, high, backward, forward = self._safe_span(index, joint["position"])
                 except ValueError:
                     low, high, backward, forward = self.bounds.lower[index], self.bounds.upper[index], False, False
-                fault = f"Servo fault {joint['status']}" if joint["status"] else None
+                fault = ("Voltage alarm (status 1)" if joint["status"] == 1 else
+                         f"Servo fault {joint['status']}" if joint["status"] else None)
                 enabled = all_powered and fault is None and joint["voltage"] >= MIN_VOLTAGE_RAW
                 setting = self.settings[str(index + 1)]
                 motors.append({
