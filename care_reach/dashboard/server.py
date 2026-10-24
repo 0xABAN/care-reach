@@ -18,19 +18,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from serial.tools import list_ports
-
-from care_reach.dashboard.panel import SCALES, PanelController
+from care_reach.dashboard.panel import PanelController
+from care_reach.hardware.bus import find_port
+from care_reach.settings import SPEED_SCALES
 
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
-
-
-def find_port():
-    ports = [p.device for p in list_ports.comports() if p.vid == 0x1A86 and p.pid == 0x55D3]
-    if len(ports) != 1:
-        raise RuntimeError(f"Expected one URT-2 (USB 1A86:55D3), found {len(ports)}; use --port")
-    return ports[0]
 
 
 def motor_id(value):
@@ -129,7 +122,7 @@ def handler_for(arm, port):
                 elif path == "/api/scale":
                     motor = motor_id(data.get("motor"))
                     scale = data.get("scale")
-                    if type(scale) is not int or scale not in SCALES:
+                    if type(scale) is not int or scale not in SPEED_SCALES:
                         raise ValueError("scale must be 1, 2, 4, or 8")
                     result = arm.scale(motor, scale)
                 elif path == "/api/hold-all":

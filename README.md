@@ -33,11 +33,12 @@ The `care_reach` package is organized by responsibility, from pure planning outw
 
 | Module | Responsibility |
 | --- | --- |
-| `care_reach/robot.py` | Facts about this arm: joint order, robot id, and where its record files live. |
+| `care_reach/robot.py` | Facts about this arm: joint order, Home, the folded pose loader, and where its record files live. |
+| `care_reach/settings.py` | Loads and atomically saves `config/joint_settings.json`. |
 | `care_reach/motion/` | Safety bounds (`bounds.py`) and blended trajectory planning (`trajectory.py`). Never touches hardware. |
 | `care_reach/policy.py` | Converts and splices model (VLA) actions into validated tick poses. Not yet wired to a live policy. |
-| `care_reach/hardware/` | Guarded controllers that open the bus: trajectory playback from Home (`arm_runtime.py`) and a measured-feedback pose move (`measured_pose_runner.py`). |
-| `care_reach/routines/` | Command-line motions: `home`, `park`, and `dance`. Each plans offline and opens the bus only with `--execute` (home always moves). |
+| `care_reach/hardware/` | Shared bus access and live guards (`bus.py`), trajectory playback from Home (`arm_runtime.py`), and a measured-feedback pose move (`measured_pose_runner.py`). Only `bus.py` imports LeRobot. |
+| `care_reach/routines/` | Command-line motions: `home`, `park`, and `dance`. Park and dance plan offline and open the bus only with `--execute`; home always moves. Without `--port`, they find the URT-2 by its USB ID. |
 | `care_reach/dashboard/` | The jog panel: bus-owning controller (`panel.py`) and loopback HTTP server (`server.py`). |
 | `config/` | This arm's joint settings, folded pose, calibration backup, and LeRobot patch. |
 
@@ -69,8 +70,8 @@ The active calibration lives in `~/.cache/huggingface/lerobot/calibration/robots
 
 The downloaded public SO-101 dataset and ACT checkpoint are research inputs, not validated live policies here. Converted source actions exceed this arm's saved limits in 18.47% of frames, and all 128 source episodes contain an out-of-limit action. The checkpoint also requires calibrated top and wrist cameras. See [findings](research/open_so101_motion/FINDINGS.md) and [local feasibility](research/open_so101_motion/LOCAL_FEASIBILITY.md). Large model and dataset files stay outside Git.
 
-From the Pi checkout, run the offline tests with:
+Run the offline tests from the checkout root. They use fake buses, so they need neither LeRobot nor an attached arm:
 
 ```bash
-PYTHONPATH=~/worktrees/care-reach/lerobot-runtime-src .venv/bin/python -m unittest discover -s tests -t . -q
+.venv/bin/python -m unittest discover -s tests -t . -q
 ```

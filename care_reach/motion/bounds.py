@@ -1,7 +1,7 @@
 """Per-joint safety bounds and pose validation for the SO-101 follower.
 
-This module deliberately has no bus, serial, or robot imports. Every motion
-path validates its tick poses here before any hardware call can use them.
+This module deliberately has no bus or serial imports. Every motion path
+validates its tick poses here before any hardware call can use them.
 """
 
 from __future__ import annotations
@@ -13,6 +13,13 @@ from pathlib import Path
 from typing import Sequence
 
 from care_reach.robot import CALIBRATION_PATH, JOINT_NAMES, JOINT_SETTINGS_PATH
+from care_reach.settings import load_joint_settings
+
+
+# Provisional stops applied on top of saved limits: wrist roll resisted motion
+# near 3358 ticks, and the gripper jaws measured contact at 1317 ticks.
+WRIST_ROLL_MAX_TICK = 3300
+GRIPPER_MIN_TICK = 1340
 
 
 class UnsafePoseError(ValueError):
@@ -45,20 +52,16 @@ class SafetyBounds:
     @classmethod
     def from_files(
         cls,
-        settings_path: str | Path | None = None,
-        calibration_path: str | Path | None = None,
+        settings_path: str | Path = JOINT_SETTINGS_PATH,
+        calibration_path: str | Path = CALIBRATION_PATH,
     ) -> SafetyBounds:
         """Intersect panel limits, LeRobot calibration, and provisional stops.
 
         A null panel limit means that end uses the calibrated range. The
-        provisional stops reflect the observed wrist roll jam and the tested
-        gripper opening. They apply in position mode, where ticks are 0..4095.
+        provisional stops apply in position mode, where ticks are 0..4095.
         """
-        settings_path = Path(settings_path) if settings_path is not None else JOINT_SETTINGS_PATH
-        calibration_path = Path(calibration_path) if calibration_path is not None else CALIBRATION_PATH
-        with settings_path.open(encoding="utf-8") as file:
-            settings = json.load(file)
-        with calibration_path.open(encoding="utf-8") as file:
+        settings = load_joint_settings(settings_path)
+        with Path(calibration_path).open(encoding="utf-8") as file:
             calibration = json.load(file)
 
         lower: list[int] = []
@@ -67,10 +70,10 @@ class SafetyBounds:
             joint = calibration[name]
             panel = settings[str(index)]
             cal_lo, cal_hi = int(joint["range_min"]), int(joint["range_max"])
-            panel_lo = cal_lo if panel["lower"] is None else int(panel["lower"])
-            panel_hi = cal_hi if panel["upper"] is None else int(panel["upper"])
-            lo = max(cal_lo, panel_lo, 1340 if index == 6 else 0)
-            hi = min(cal_hi, panel_hi, 3300 if index == 5 else 4095)
+            panel_lo = cal_lo if panel["lower"] is None else panel["lower"]
+            panel_hi = cal_hi if panel["upper"] is None else panel["upper"]
+            lo = max(cal_lo, panel_lo, GRIPPER_MIN_TICK if name == "gripper" else 0)
+            hi = min(cal_hi, panel_hi, WRIST_ROLL_MAX_TICK if name == "wrist_roll" else 4095)
             lower.append(lo)
             upper.append(hi)
         return cls(tuple(lower), tuple(upper))

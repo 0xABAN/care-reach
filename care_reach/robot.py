@@ -1,5 +1,8 @@
 """Facts about this one assembled SO-101 follower and where its records live."""
 
+from __future__ import annotations
+
+import json
 from pathlib import Path
 
 
@@ -14,6 +17,12 @@ JOINT_NAMES = (
     "wrist_roll",
     "gripper",
 )
+JOINT_LABELS = ("Shoulder pan", "Shoulder lift", "Elbow flex", "Wrist flex", "Wrist roll", "Gripper")
+
+# Home is a convention for powered tests and the dance, not a guarantee that
+# every joint is at its geometric center.
+HOME_TICK = 2000
+HOME_POSE = (HOME_TICK,) * len(JOINT_NAMES)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_DIR = REPO_ROOT / "config"
@@ -29,3 +38,20 @@ FOLDED_POSE_PATH = CONFIG_DIR / "folded_pose.json"
 CALIBRATION_PATH = (
     Path.home() / ".cache/huggingface/lerobot/calibration/robots/so_follower" / f"{ROBOT_ID}.json"
 )
+
+
+def load_folded_pose(path: str | Path = FOLDED_POSE_PATH) -> tuple[int, ...]:
+    """Read the six exact encoder ticks of Lance's physical folded pose."""
+    with Path(path).open(encoding="utf-8") as stream:
+        record = json.load(stream)
+    if record.get("robot_id") != ROBOT_ID:
+        raise ValueError("folded pose belongs to a different robot")
+
+    positions = record.get("positions_ticks")
+    if not isinstance(positions, dict) or set(positions) != set(JOINT_NAMES):
+        raise ValueError("folded pose must name exactly the six follower joints")
+
+    ticks = tuple(positions[name] for name in JOINT_NAMES)
+    if any(isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 4095 for value in ticks):
+        raise ValueError("folded pose must contain six valid integer encoder ticks")
+    return ticks

@@ -8,10 +8,11 @@ of obstacles and leave servo power connected while it holds its pose.
 import argparse
 import time
 
-from lerobot.motors import Motor, MotorNormMode, SerialMotorsBus
+from care_reach.hardware.bus import MIN_VOLTAGE_RAW, find_port, make_bus
+from care_reach.robot import HOME_TICK, JOINT_NAMES
+from care_reach.routines.cli import PORT_HELP
 
-NAMES = ("shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper")
-HOME = 2000
+
 TOLERANCE = 15
 MAX_STEP = 100
 GOAL_SPEED = 2  # About 100 encoder ticks/s with the current servo phase.
@@ -22,16 +23,12 @@ FAST_PERIOD_S = 0.15
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--port", default="/dev/cu.usbmodem5B790785631")
+    parser.add_argument("--port", help=PORT_HELP)
     parser.add_argument("--speed", type=int, choices=range(1, 9), default=GOAL_SPEED,
                         help="STS3215 running-speed register (4 is the faster tested setting)")
     args = parser.parse_args(argv)
     period_s = FAST_PERIOD_S if args.speed >= 4 else SLOW_PERIOD_S
-    motors = {
-        name: Motor(i, "sts3215", MotorNormMode.RANGE_0_100 if i == 6 else MotorNormMode.DEGREES)
-        for i, name in enumerate(NAMES, 1)
-    }
-    bus = SerialMotorsBus(args.port, motors)
+    bus = make_bus(args.port or find_port())
     bus.connect(handshake=True)
 
     def read(register, name):
@@ -45,13 +42,13 @@ def main(argv=None):
         # the wrong direction. Widen only these four known affected motors; the
         # trajectory below enforces the 2000-tick target and bounded steps.
         for i in (2, 3, 4, 6):
-            name = NAMES[i - 1]
+            name = JOINT_NAMES[i - 1]
             if read("Min_Position_Limit", name) != 0:
                 write("Min_Position_Limit", name, 0)
             if read("Max_Position_Limit", name) != 4095:
                 write("Max_Position_Limit", name, 4095)
 
-        for i, name in enumerate(NAMES, 1):
+        for i, name in enumerate(JOINT_NAMES, 1):
             position = read("Present_Position", name)
             write("Goal_Position", name, position)
             if read("Torque_Enable", name) != 1:
@@ -72,38 +69,38 @@ def main(argv=None):
                     "voltage": read("Present_Voltage", name),
                     "torque": read("Torque_Enable", name),
                 }
-                for name in NAMES
+                for name in JOINT_NAMES
             }
-            positions = {i: state[name]["position"] for i, name in enumerate(NAMES, 1)}
+            positions = {i: state[name]["position"] for i, name in enumerate(JOINT_NAMES, 1)}
             print(f"{cycle:02d} {positions}", flush=True)
-            if any(v["status"] or v["voltage"] < 48 or v["torque"] != 1 for v in state.values()):
+            if any(v["status"] or v["voltage"] < MIN_VOLTAGE_RAW or v["torque"] != 1 for v in state.values()):
                 raise RuntimeError(f"Servo fault, low voltage, or lost torque: {state}")
-            if all(abs(p - HOME) <= TOLERANCE for p in positions.values()):
-                for name in NAMES:
-                    write("Goal_Position", name, HOME)
+            if all(abs(p - HOME_TICK) <= TOLERANCE for p in positions.values()):
+                for name in JOINT_NAMES:
+                    write("Goal_Position", name, HOME_TICK)
                 print("HOME REACHED; torque remains enabled", flush=True)
                 return
 
             # Command every joint on every cycle, including joints already home.
-            for name in NAMES:
+            for name in JOINT_NAMES:
                 position = state[name]["position"]
-                error = position - HOME
+                error = position - HOME_TICK
                 if name in trim_pending:
-                    goal = HOME
+                    goal = HOME_TICK
                     trim_pending.remove(name)
                 elif TOLERANCE < abs(error) <= 40:
                     # A small error may sit in the servo's static-friction deadband.
                     # Briefly approach from beyond home, then settle at 2000.
-                    goal = HOME - (40 if error > 0 else -40)
+                    goal = HOME_TICK - (40 if error > 0 else -40)
                     trim_pending.add(name)
                 else:
-                    goal = max(position - MAX_STEP, HOME) if error > 0 else min(position + MAX_STEP, HOME)
+                    goal = max(position - MAX_STEP, HOME_TICK) if error > 0 else min(position + MAX_STEP, HOME_TICK)
                 write("Goal_Position", name, goal)
             time.sleep(period_s)
         raise RuntimeError("Home timed out; torque remains enabled")
     except BaseException:
         # Freeze the position targets. Never make a fault or Ctrl-C release torque.
-        for name in NAMES:
+        for name in JOINT_NAMES:
             try:
                 write("Goal_Position", name, read("Present_Position", name))
             except Exception:

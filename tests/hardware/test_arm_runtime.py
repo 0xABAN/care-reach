@@ -2,7 +2,8 @@
 
 import unittest
 
-from care_reach.hardware.arm_runtime import ArmRuntime, ArmSafetyError
+from care_reach.hardware.arm_runtime import ArmRuntime
+from care_reach.hardware.bus import ArmSafetyError
 from care_reach.motion.bounds import SafetyBounds, UnsafePoseError
 from care_reach.robot import JOINT_NAMES
 

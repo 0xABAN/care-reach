@@ -9,8 +9,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from care_reach.motion.bounds import SafetyBounds, UnsafePoseError, validate_pose
-from care_reach.robot import JOINT_NAMES
-from care_reach.routines.park import FOLD_VMAX, HOME, build_plan, folded_bounds, folded_target, main
+from care_reach.robot import HOME_POSE, JOINT_NAMES, load_folded_pose
+from care_reach.routines.park import FOLD_VMAX, build_plan, folded_bounds, main
 
 
 class ParkTests(unittest.TestCase):
@@ -42,7 +42,7 @@ class ParkTests(unittest.TestCase):
         self.bounds = SafetyBounds.from_files(self.settings_path, self.calibration_path)
 
     def test_manually_measured_fold_is_saved_exactly(self):
-        target = folded_target(self.pose_path)
+        target = load_folded_pose(self.pose_path)
         self.assertEqual(target, (2040, 893, 3064, 2888, 2416, 1470))
         with self.assertRaisesRegex(UnsafePoseError, "motor 2"):
             validate_pose(target, self.bounds)
@@ -57,7 +57,7 @@ class ParkTests(unittest.TestCase):
 
     def test_fold_moves_loaded_joints_together_inside_bounds(self):
         target, task_bounds, frames = build_plan(self.bounds, self.pose_path)
-        self.assertEqual(frames[0], HOME)
+        self.assertEqual(frames[0], HOME_POSE)
         self.assertEqual(frames[-1], target)
         self.assertTrue(all(validate_pose(frame, task_bounds) == frame for frame in frames))
         halfway = frames[len(frames) // 2]
@@ -73,7 +73,7 @@ class ParkTests(unittest.TestCase):
         restricted = SafetyBounds((1500, 1500, 1500, 1500, 1500, 1340), (2500, 2500, 2500, 2500, 2500, 2742))
         with self.assertRaisesRegex(UnsafePoseError, "motor 2"):
             build_plan(restricted, self.pose_path)
-        with patch.dict(sys.modules, {"care_reach.hardware.arm_runtime": None}):
+        with patch.dict(sys.modules, {"care_reach.hardware.bus": None, "care_reach.hardware.measured_pose_runner": None}):
             self.assertEqual(main(["--dry-run", "--settings", str(self.settings_path),
                                    "--calibration", str(self.calibration_path),
                                    "--pose", str(self.pose_path)]), 0)
@@ -87,13 +87,13 @@ class ParkTests(unittest.TestCase):
         pose["robot_id"] = "someone_else"
         self.pose_path.write_text(json.dumps(pose), encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "different robot"):
-            folded_target(self.pose_path)
+            load_folded_pose(self.pose_path)
 
     def test_execute_uses_measured_feedback_runner_and_park_bounds(self):
         with patch("care_reach.hardware.measured_pose_runner.MeasuredPoseRunner") as runner_type:
             runner_type.return_value.move.return_value = {
                 "elapsed_s": 1.2,
-                "positions": dict(zip(JOINT_NAMES, folded_target(self.pose_path), strict=True)),
+                "positions": dict(zip(JOINT_NAMES, load_folded_pose(self.pose_path), strict=True)),
             }
             self.assertEqual(main([
                 "--execute", "--port", "fake", "--settings", str(self.settings_path),
@@ -103,7 +103,7 @@ class ParkTests(unittest.TestCase):
         task_bounds = runner_type.call_args.args[1]
         self.assertEqual(task_bounds.lower[1], 893)
         self.assertEqual(task_bounds.upper[2], 3064)
-        self.assertEqual(runner_type.return_value.move.call_args.args[0], folded_target(self.pose_path))
+        self.assertEqual(runner_type.return_value.move.call_args.args[0], load_folded_pose(self.pose_path))
         self.assertEqual(runner_type.return_value.move.call_args.kwargs["max_lead"], 80)
 
 

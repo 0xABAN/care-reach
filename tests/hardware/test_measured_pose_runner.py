@@ -2,7 +2,8 @@
 
 import unittest
 
-from care_reach.hardware.measured_pose_runner import MeasuredPoseRunner, PoseMoveError
+from care_reach.hardware.bus import ArmSafetyError
+from care_reach.hardware.measured_pose_runner import MeasuredPoseRunner
 from care_reach.motion.bounds import SafetyBounds, UnsafePoseError
 from care_reach.robot import JOINT_NAMES
 
@@ -90,7 +91,7 @@ class RunnerTests(unittest.TestCase):
                     self.status["elbow_flex"] = 32
 
         bus = FaultBus("unused")
-        with self.assertRaisesRegex(PoseMoveError, "elbow_flex: status 32"):
+        with self.assertRaisesRegex(ArmSafetyError, "elbow_flex: status 32"):
             MeasuredPoseRunner("unused", BOUNDS, bus_factory=lambda _: bus, clock=FakeClock()).move(
                 (2200, 1800, 2200, 2100, 2100, 1900)
             )
@@ -129,7 +130,7 @@ class RunnerTests(unittest.TestCase):
         bus = FakeBus("unused")
         bus.positions["elbow_flex"] = BOUNDS.upper[2] + 6
         target = (2000, 2000, BOUNDS.upper[2], 2000, 2000, 2000)
-        with self.assertRaisesRegex(PoseMoveError, "elbow_flex: measured position"):
+        with self.assertRaisesRegex(ArmSafetyError, "elbow_flex: measured position"):
             MeasuredPoseRunner("unused", BOUNDS, bus_factory=lambda _: bus, clock=FakeClock()).move(target)
         self.assertEqual(bus.writes[-1]["elbow_flex"], BOUNDS.upper[2])
         self.assertEqual(bus.disconnects, [False])

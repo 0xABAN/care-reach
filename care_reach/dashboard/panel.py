@@ -6,23 +6,37 @@ browser must keep renewing; torque stays enabled when a hold ends.
 
 from __future__ import annotations
 
-import json
 import logging
-import os
 import threading
 import time
 import uuid
 from pathlib import Path
 
-from lerobot.motors import Motor, MotorNormMode, SerialMotorsBus
-
+from care_reach.hardware.bus import (
+    MIN_VOLTAGE_RAW,
+    STALL_ERROR_TICKS,
+    STALL_PROGRESS_TICKS,
+    STALL_TIME_S,
+    ArmSafetyError,
+    LoadWatch,
+    check_voltage,
+    make_bus,
+    read_firmware_limits,
+    read_joints,
+    require_position_mode,
+)
 from care_reach.motion.bounds import SafetyBounds
-from care_reach.robot import JOINT_NAMES, JOINT_SETTINGS_PATH
-from care_reach.routines.park import folded_target
+from care_reach.robot import (
+    CALIBRATION_PATH,
+    FOLDED_POSE_PATH,
+    JOINT_LABELS,
+    JOINT_NAMES,
+    JOINT_SETTINGS_PATH,
+    load_folded_pose,
+)
+from care_reach.settings import load_joint_settings, save_joint_settings
 
 
-LABELS = ("Shoulder pan", "Shoulder lift", "Elbow flex", "Wrist flex", "Wrist roll", "Gripper")
-SCALES = (1, 2, 4, 8)
 BASE_TICKS_PER_SECOND = 25
 MAX_COMMAND_SPEED = (180, 180, 180, 180, 200, 180)
 MAX_COMMAND_ACCELERATION = (300, 300, 300, 300, 360, 300)
@@ -30,75 +44,37 @@ MAX_TARGET_LEAD = 80
 RECOVERY_MARGIN = 40  # Allow a small encoder drift past the saved fold, inward only.
 STEP_SECONDS = 0.04
 LEASE_SECONDS = 0.75
-MIN_VOLTAGE_RAW = 48
-MAX_LOAD = 900
+GOTO_TIMEOUT_SECONDS = 35
 POSITION_TOLERANCE = 15
-
-
-def load_settings(path: Path = JOINT_SETTINGS_PATH):
-    result = {str(i): {"lower": None, "upper": None, "scale": 1} for i in range(1, 7)}
-    if path.exists():
-        saved = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(saved, dict):
-            raise ValueError("joint_settings.json must be an object")
-        for key, entry in saved.items():
-            if key not in result or not isinstance(entry, dict):
-                raise ValueError(f"Invalid settings entry {key}")
-            lower, upper, scale = entry.get("lower"), entry.get("upper"), entry.get("scale", 1)
-            if any(value is not None and (type(value) is not int or not 0 <= value <= 4095)
-                   for value in (lower, upper)):
-                raise ValueError(f"Invalid limit for motor {key}")
-            if lower is not None and upper is not None and lower >= upper:
-                raise ValueError(f"Lower limit must be less than upper limit for motor {key}")
-            if type(scale) is not int or scale not in SCALES:
-                raise ValueError(f"Invalid scale for motor {key}")
-            result[key] = {"lower": lower, "upper": upper, "scale": scale}
-    return result
+MAX_TEMPERATURE_C = 55
 
 
 class PanelController:
     """One owner of the serial bus. Read-only on connect; every motion is explicit."""
 
     def __init__(self, port, *, bus_factory=None, settings_path: Path = JOINT_SETTINGS_PATH,
-                 calibration_path: Path | None = None, pose_path: Path | None = None):
+                 calibration_path: Path = CALIBRATION_PATH, pose_path: Path = FOLDED_POSE_PATH):
         self.lock = threading.RLock()
         self.settings_path = Path(settings_path)
         self.calibration_path = calibration_path
-        self.settings = load_settings(self.settings_path)
-        self.folded = folded_target(pose_path) if pose_path is not None else folded_target()
+        self.settings = load_joint_settings(self.settings_path)
+        self.folded = load_folded_pose(pose_path)
         self.bounds = SafetyBounds.from_files(self.settings_path, self.calibration_path)
         self.park_bounds = self._fold_envelope(self.bounds)
         self.hold = None
         self.error = None
         self.closed = False
-        self.bus = (bus_factory or self._real_bus)(port)
+        self.bus = (bus_factory or make_bus)(port)
         self.bus.connect(handshake=True)
         try:
-            self.firmware_min = self._read("Min_Position_Limit")
-            self.firmware_max = self._read("Max_Position_Limit")
-            modes = self._read("Operating_Mode")
-            if any(modes[name] != 0 for name in JOINT_NAMES):
-                raise RuntimeError("All motors must be in position mode 0; no modes were changed")
+            self.firmware_min, self.firmware_max = read_firmware_limits(self.bus)
+            require_position_mode(self.bus)
             self._snapshot()
         except Exception:
             self.bus.disconnect(disable_torque=False)
             raise
         self.worker = threading.Thread(target=self._worker, name="so101-panel-jog", daemon=True)
         self.worker.start()
-
-    @staticmethod
-    def _real_bus(port):
-        motors = {
-            name: Motor(index, "sts3215", MotorNormMode.RANGE_0_100 if index == 6 else MotorNormMode.DEGREES)
-            for index, name in enumerate(JOINT_NAMES, 1)
-        }
-        return SerialMotorsBus(port=port, motors=motors)
-
-    def _read(self, register):
-        values = self.bus.sync_read(register, normalize=False, num_retry=2)
-        if set(values) != set(JOINT_NAMES):
-            raise RuntimeError(f"Incomplete {register} read")
-        return {name: int(values[name]) for name in JOINT_NAMES}
 
     def _snapshot(self):
         names = (
@@ -110,7 +86,7 @@ class PanelController:
             ("temperature", "Present_Temperature"),
             ("load", "Present_Load"),
         )
-        fields = {label: self._read(register) for label, register in names}
+        fields = {label: read_joints(self.bus, register) for label, register in names}
         return {
             name: {label: fields[label][name] for label, _ in names}
             for name in JOINT_NAMES
@@ -146,17 +122,15 @@ class PanelController:
         for index, name in enumerate(JOINT_NAMES):
             joint = snapshot[name]
             if joint["status"] != 0:
-                raise RuntimeError(f"Motor {index + 1} servo fault {joint['status']}")
+                raise ArmSafetyError(f"Motor {index + 1} servo fault {joint['status']}")
             if need_torque and joint["torque"] != 1:
-                raise RuntimeError(f"Motor {index + 1} torque is off; use Hold all joints first")
-            if joint["voltage"] < MIN_VOLTAGE_RAW:
-                if self._read("Present_Voltage")[name] < MIN_VOLTAGE_RAW:
-                    raise RuntimeError(f"Motor {index + 1} voltage stayed low")
-            if joint["temperature"] > 55:
-                raise RuntimeError(f"Motor {index + 1} is too hot")
+                raise ArmSafetyError(f"Motor {index + 1} torque is off; use Hold all joints first")
+            check_voltage(self.bus, name, joint["voltage"])
+            if joint["temperature"] > MAX_TEMPERATURE_C:
+                raise ArmSafetyError(f"Motor {index + 1} is too hot")
             position = joint["position"]
             if not self.firmware_min[name] <= position <= self.firmware_max[name]:
-                raise RuntimeError(f"Motor {index + 1} exceeds firmware position bounds")
+                raise ArmSafetyError(f"Motor {index + 1} exceeds firmware position bounds")
             self._safe_span(index, position)
 
     def _write_goal(self, motor, tick):
@@ -167,9 +141,9 @@ class PanelController:
 
     def _hold_measured(self, motor):
         name = JOINT_NAMES[motor - 1]
-        if self._read("Torque_Enable")[name] != 1:
+        if read_joints(self.bus, "Torque_Enable")[name] != 1:
             return
-        position = self._read("Present_Position")[name]
+        position = read_joints(self.bus, "Present_Position")[name]
         self._write_goal(motor, position)
 
     def _stop(self):
@@ -183,7 +157,7 @@ class PanelController:
             snapshot = self._snapshot()
             all_powered = all(snapshot[name]["torque"] == 1 for name in JOINT_NAMES)
             motors = []
-            for index, (name, label) in enumerate(zip(JOINT_NAMES, LABELS, strict=True)):
+            for index, (name, label) in enumerate(zip(JOINT_NAMES, JOINT_LABELS, strict=True)):
                 joint = snapshot[name]
                 try:
                     low, high, backward, forward = self._safe_span(index, joint["position"])
@@ -265,8 +239,8 @@ class PanelController:
             "direction": direction, "target": position if target is None else target,
             "command": float(position), "velocity": 0.0, "last_goal": position,
             "last_position": position, "progress_at": now, "last_update": now,
-            "expires": now + LEASE_SECONDS if mode == "jog" else now + 35,
-            "high_load_count": 0,
+            "expires": now + (LEASE_SECONDS if mode == "jog" else GOTO_TIMEOUT_SECONDS),
+            "load_watch": LoadWatch(),
             "next": now,
         }
 
@@ -294,10 +268,7 @@ class PanelController:
         index = hold["motor"] - 1
         name = JOINT_NAMES[index]
         position = snapshot[name]["position"]
-        load = abs(snapshot[name]["load"])
-        hold["high_load_count"] = hold["high_load_count"] + 1 if load >= MAX_LOAD else 0
-        if hold["high_load_count"] >= 3:
-            raise RuntimeError(f"Motor {index + 1} sustained high load")
+        hold["load_watch"].check(name, snapshot[name]["load"])
         low, high, backward, forward = self._safe_span(index, position)
         dt = max(0.001, min(0.1, now - hold["last_update"]))
         hold["last_update"] = now
@@ -335,11 +306,11 @@ class PanelController:
         if tick != hold["last_goal"]:
             self._write_goal(hold["motor"], tick)
             hold["last_goal"] = tick
-        if abs(position - hold["last_position"]) >= 4:
+        if abs(position - hold["last_position"]) >= STALL_PROGRESS_TICKS:
             hold["last_position"] = position
             hold["progress_at"] = now
-        elif abs(hold["last_goal"] - position) > 35 and now - hold["progress_at"] > 0.8:
-            raise RuntimeError(f"Motor {index + 1} stalled at {position}")
+        elif abs(hold["last_goal"] - position) > STALL_ERROR_TICKS and now - hold["progress_at"] > STALL_TIME_S:
+            raise ArmSafetyError(f"Motor {index + 1} stalled at {position}")
         hold["next"] = now + STEP_SECONDS
 
     def _worker(self):
@@ -362,7 +333,7 @@ class PanelController:
     def limit(self, motor, bound, clear):
         with self.lock:
             self._stop()
-            value = None if clear else self._read("Present_Position")[JOINT_NAMES[motor - 1]]
+            value = None if clear else read_joints(self.bus, "Present_Position")[JOINT_NAMES[motor - 1]]
             entry = self.settings[str(motor)]
             other = entry["upper" if bound == "lower" else "lower"]
             if value is not None and other is not None:
@@ -371,11 +342,11 @@ class PanelController:
             old = entry[bound]
             entry[bound] = value
             try:
-                self._save()
+                save_joint_settings(self.settings_path, self.settings)
                 self._refresh_bounds()
             except Exception:
                 entry[bound] = old
-                self._save()
+                save_joint_settings(self.settings_path, self.settings)
                 self._refresh_bounds()
                 raise
             return {"motor": motor, "bound": bound, "value": value}
@@ -383,17 +354,8 @@ class PanelController:
     def scale(self, motor, scale):
         with self.lock:
             self.settings[str(motor)]["scale"] = scale
-            self._save()
+            save_joint_settings(self.settings_path, self.settings)
             return {"motor": motor, "scale": scale}
-
-    def _save(self):
-        tmp = self.settings_path.with_suffix(".json.tmp")
-        with tmp.open("w", encoding="utf-8") as stream:
-            json.dump(self.settings, stream, indent=2)
-            stream.write("\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        tmp.replace(self.settings_path)
 
     def hold_all(self):
         with self.lock:
@@ -406,8 +368,8 @@ class PanelController:
             for index, name in enumerate(JOINT_NAMES):
                 self._write_goal(index + 1, positions[name])
             self.bus.sync_write("Torque_Enable", {name: 1 for name in JOINT_NAMES}, normalize=False)
-            if any(value != 1 for value in self._read("Torque_Enable").values()):
-                raise RuntimeError("One or more motors did not enable torque")
+            if any(value != 1 for value in read_joints(self.bus, "Torque_Enable").values()):
+                raise ArmSafetyError("One or more motors did not enable torque")
             return {"ok": True}
 
     def close(self):

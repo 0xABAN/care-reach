@@ -12,17 +12,23 @@ import math
 from collections.abc import Iterable
 from typing import Any
 
+from care_reach.hardware.bus import (
+    STALL_ERROR_TICKS,
+    STALL_PROGRESS_TICKS,
+    STALL_TIME_S,
+    ArmSafetyError,
+    LoadWatch,
+    check_voltage,
+    make_bus,
+    read_firmware_limits,
+    read_joints,
+    require_position_mode,
+)
 from care_reach.motion.bounds import SafetyBounds, UnsafePoseError, validate_pose
-from care_reach.robot import JOINT_NAMES
+from care_reach.robot import HOME_TICK, JOINT_NAMES
 
 
-HOME = 2000
 HOME_TOLERANCE = 120
-MIN_VOLTAGE_RAW = 48  # STS3215 register is in tenths of a volt.
-MAX_LOAD_MAGNITUDE = 900  # LeRobot decodes Present_Load as a signed value.
-STALL_ERROR = 35
-STALL_TIME_S = 0.8
-STALL_PROGRESS_TICKS = 4
 FINISH_TOLERANCE = 15
 FINISH_TIMEOUT_S = 8.0
 HOME_TRIM_TICKS = 45
@@ -32,26 +38,13 @@ DEFAULT_COMMAND_SPEED = (90.0, 90.0, 90.0, 90.0, 140.0, 90.0)  # ticks/s
 DEFAULT_COMMAND_ACCELERATION = (120.0, 120.0, 120.0, 120.0, 180.0, 120.0)  # ticks/s^2
 
 
-class ArmSafetyError(RuntimeError):
-    """A preflight or live safety guard stopped playback."""
-
-
-def _real_bus(port: str):
-    # Keep the serial stack out of fake-bus unit tests and import-time use.
-    from lerobot.motors import Motor, MotorNormMode, SerialMotorsBus
-
-    motors = {
-        name: Motor(index, "sts3215", MotorNormMode.RANGE_0_100 if index == 6 else MotorNormMode.DEGREES)
-        for index, name in enumerate(JOINT_NAMES, start=1)
-    }
-    return SerialMotorsBus(port=port, motors=motors)
-
-
 class ArmRuntime:
+    """Play a validated tick trajectory that starts near Home, one run per instance."""
+
     def __init__(self, port: str, bounds: SafetyBounds, bus_factory=None):
         self.port = port
         self.bounds = bounds
-        self._bus_factory = bus_factory or _real_bus
+        self._bus_factory = bus_factory or make_bus
         self._bus = None
         self._connected = False
         self._closed = False
@@ -65,16 +58,9 @@ class ArmRuntime:
     def __exit__(self, _type, _value, _traceback) -> None:
         self.close()
 
-    def _read(self, register: str) -> dict[str, int]:
-        assert self._bus is not None
-        values = self._bus.sync_read(register, normalize=False, num_retry=2)
-        if set(values) != set(JOINT_NAMES):
-            raise ArmSafetyError(f"Incomplete {register} read: {sorted(values)}")
-        return {name: int(values[name]) for name in JOINT_NAMES}
-
     def _sample(self) -> dict[str, dict[str, int]]:
         readings = {
-            field: self._read(register)
+            field: read_joints(self._bus, register)
             for field, register in (
                 ("position", "Present_Position"),
                 ("status", "Status"),
@@ -97,12 +83,7 @@ class ArmRuntime:
             position = joint["position"]
             if not self.bounds.lower[index] <= position <= self.bounds.upper[index]:
                 raise ArmSafetyError(f"{name}: measured position {position} exceeds software limits")
-            if joint["voltage"] < MIN_VOLTAGE_RAW:
-                # Brief STS3215 voltage dips are known on this 5 V supply.
-                second = self._read("Present_Voltage")[name]
-                joint["voltage_recheck"] = second
-                if second < MIN_VOLTAGE_RAW:
-                    raise ArmSafetyError(f"{name}: voltage stayed low ({joint['voltage']}, {second})")
+            check_voltage(self._bus, name, joint["voltage"])
 
     def _write_goals(self, goals: dict[str, int]) -> None:
         pose = validate_pose(tuple(goals[name] for name in JOINT_NAMES), self.bounds)
@@ -115,7 +96,7 @@ class ArmRuntime:
         if not self._connected or self._bus is None:
             return
         try:
-            positions = self._read("Present_Position")
+            positions = read_joints(self._bus, "Present_Position")
             self._last_positions = positions
         except Exception:
             positions = self._last_positions
@@ -179,15 +160,14 @@ class ArmRuntime:
         commanded = 0
         stalled_since: dict[str, float | None] = {name: None for name in JOINT_NAMES}
         stalled_at: dict[str, int] = {}
-        high_load_count = {name: 0 for name in JOINT_NAMES}
+        load_watch = LoadWatch()
 
         try:
             self._bus = self._bus_factory(self.port)
             self._bus.connect(handshake=True)
             self._connected = True
 
-            firmware_min = self._read("Min_Position_Limit")
-            firmware_max = self._read("Max_Position_Limit")
+            firmware_min, firmware_max = read_firmware_limits(self._bus)
             self._firmware_limits = firmware_min, firmware_max
             for index, name in enumerate(JOINT_NAMES):
                 requested_min = min(pose[index] for pose in poses)
@@ -198,16 +178,13 @@ class ArmRuntime:
                         f"{firmware_min[name]}..{firmware_max[name]}"
                     )
 
-            modes = self._read("Operating_Mode")
-            for name in JOINT_NAMES:
-                if modes[name] != 0:
-                    raise ArmSafetyError(f"{name}: operating mode {modes[name]}, expected position mode 0")
+            require_position_mode(self._bus)
             self._position_mode_verified = True
 
             initial = self._sample()
             self._check_state(initial)
             for name in JOINT_NAMES:
-                if abs(initial[name]["position"] - HOME) > HOME_TOLERANCE:
+                if abs(initial[name]["position"] - HOME_TICK) > HOME_TOLERANCE:
                     raise ArmSafetyError(f"{name}: startup is too far from home ({initial[name]['position']})")
 
             last_goal = {name: initial[name]["position"] for name in JOINT_NAMES}
@@ -230,7 +207,7 @@ class ArmRuntime:
                 if max_command_acceleration is not None:
                     max_step_change = max_command_acceleration[index] / (fps * fps)
                     # Start braking before the target. Without this, a goal
-                    # integrator can coast back and forth around HOME despite
+                    # integrator can coast back and forth around Home despite
                     # an acceleration limit on each individual frame.
                     max_step = min(max_step, math.sqrt(2 * max_step_change * abs(distance)))
                 desired_step = math.copysign(min(max_step, abs(distance)), distance) if distance else 0.0
@@ -248,6 +225,22 @@ class ArmRuntime:
                 command_position[name] = next_position
                 return max(lower, min(upper, round(next_position)))
 
+            def guard_joint(name: str, position: int, load: int, now: float, *, may_lag: bool = False) -> None:
+                """Stop on sustained high load, or on a joint stuck far from its last goal.
+
+                ``may_lag`` exempts a joint inside the near-Home trim window,
+                where resting short of a small final goal is expected.
+                """
+                load_watch.check(name, load)
+                if abs(last_goal[name] - position) > STALL_ERROR_TICKS and not may_lag:
+                    if stalled_since[name] is None or abs(position - stalled_at[name]) >= STALL_PROGRESS_TICKS:
+                        stalled_since[name] = now
+                        stalled_at[name] = position
+                    elif now - stalled_since[name] >= STALL_TIME_S:
+                        raise ArmSafetyError(f"{name}: stalled at {position}, goal {last_goal[name]}")
+                else:
+                    stalled_since[name] = None
+
             playback_started = time.monotonic()
             for frame_index, pose in enumerate(poses):
                 due = playback_started + frame_index / fps
@@ -260,21 +253,7 @@ class ArmRuntime:
                 goals = {}
                 for index, name in enumerate(JOINT_NAMES):
                     position = state[name]["position"]
-                    load = abs(state[name]["load"])
-                    high_load_count[name] = high_load_count[name] + 1 if load >= MAX_LOAD_MAGNITUDE else 0
-                    if high_load_count[name] >= 3:
-                        raise ArmSafetyError(f"{name}: sustained high load {load}")
-
-                    error = abs(last_goal[name] - position)
-                    if error > STALL_ERROR:
-                        if stalled_since[name] is None or abs(position - stalled_at[name]) >= STALL_PROGRESS_TICKS:
-                            stalled_since[name] = now
-                            stalled_at[name] = position
-                        elif now - stalled_since[name] >= STALL_TIME_S:
-                            raise ArmSafetyError(f"{name}: stalled at {position}, goal {last_goal[name]}")
-                    else:
-                        stalled_since[name] = None
-
+                    guard_joint(name, position, state[name]["load"], now)
                     goals[name] = bounded_goal(name, index, pose[index], position)
 
                 self._write_goals(goals)
@@ -305,47 +284,36 @@ class ArmRuntime:
                 goals = {}
                 for index, name in enumerate(JOINT_NAMES):
                     position = state[name]["position"]
-                    load = abs(state[name]["load"])
-                    high_load_count[name] = high_load_count[name] + 1 if load >= MAX_LOAD_MAGNITUDE else 0
-                    if high_load_count[name] >= 3:
-                        raise ArmSafetyError(f"{name}: sustained high load {load}")
                     error = abs(last_goal[name] - position)
                     near_home_trim_window = (
-                        final_pose[index] == HOME
-                        and abs(position - HOME) <= HOME_TRIM_ERROR_WINDOW
+                        final_pose[index] == HOME_TICK
+                        and abs(position - HOME_TICK) <= HOME_TRIM_ERROR_WINDOW
                         and (
                             not trim_attempted[name]
                             or trim_target[name] is not None and error <= HOME_TRIM_ERROR_WINDOW
                         )
                     )
-                    if error > STALL_ERROR and not near_home_trim_window:
-                        if stalled_since[name] is None or abs(position - stalled_at[name]) >= STALL_PROGRESS_TICKS:
-                            stalled_since[name] = now
-                            stalled_at[name] = position
-                        elif now - stalled_since[name] >= STALL_TIME_S:
-                            raise ArmSafetyError(f"{name}: stalled at {position}, goal {last_goal[name]}")
-                    else:
-                        stalled_since[name] = None
+                    guard_joint(name, position, state[name]["load"], now, may_lag=near_home_trim_window)
                     if abs(position - last_progress[name]) >= STALL_PROGRESS_TICKS:
                         last_progress[name] = position
                         stagnant_since[name] = now
                     if trim_target[name] is not None and abs(position - final_pose[index]) <= finish_tolerance:
                         # Another joint may still be settling. Retire this
-                        # joint's trim immediately so it cannot drive past HOME.
+                        # joint's trim immediately so it cannot drive past Home.
                         trim_target[name] = None
                         command_position[name] = float(position)
                         command_velocity[name] = 0.0
                     elif (
-                        final_pose[index] == HOME
+                        final_pose[index] == HOME_TICK
                         and not trim_attempted[name]
                         and abs(position - final_pose[index]) > finish_tolerance
                         and abs(last_goal[name] - position) <= HOME_TRIM_ERROR_WINDOW
                         and now - stagnant_since[name] >= HOME_TRIM_STAGNANT_S
                     ):
                         # The STS3215 can rest tens of ticks short of a small
-                        # final goal. A bounded one-time target beyond HOME
+                        # final goal. A bounded one-time target beyond Home
                         # overcomes this static-friction deadband. Stop as
-                        # soon as measured position reaches HOME tolerance.
+                        # soon as measured position reaches Home tolerance.
                         candidate = final_pose[index] - (
                             HOME_TRIM_TICKS if position > final_pose[index] else -HOME_TRIM_TICKS
                         )

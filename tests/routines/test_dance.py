@@ -12,7 +12,7 @@ import unittest
 from unittest.mock import patch
 
 from care_reach.motion.bounds import SafetyBounds, validate_pose
-from care_reach.robot import JOINT_NAMES
+from care_reach.robot import HOME_POSE, JOINT_NAMES
 from care_reach.routines import dance
 
 
@@ -22,7 +22,7 @@ class DanceDemoTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.settings = Path(self.temp.name) / "limits.json"
         self.settings.write_text(
-            json.dumps({str(i): {"lower": 1500, "upper": 2500} for i in range(1, 7)})
+            json.dumps({str(i): {"lower": 1500, "upper": 2500, "scale": 1} for i in range(1, 7)})
         )
         self.calibration = Path(self.temp.name) / "calibration.json"
         self.calibration.write_text(
@@ -32,7 +32,7 @@ class DanceDemoTests(unittest.TestCase):
     def test_data_inspired_phases_include_counterrotation_and_gripper_beats(self) -> None:
         waypoints = dance.build_waypoints(1.0)
         self.assertEqual(len(waypoints), len(dance.PHASE_VMAX))
-        self.assertEqual(waypoints[-1][1], dance.HOME)
+        self.assertEqual(waypoints[-1][1], HOME_POSE)
         # The first broad arm arc counter-rotates loaded lift and elbow.
         self.assertGreater(waypoints[0][1][1] - 2000, 0)
         self.assertLess(waypoints[0][1][2] - 2000, 0)
@@ -47,8 +47,8 @@ class DanceDemoTests(unittest.TestCase):
     def test_full_scale_path_is_bounded_and_home_to_home(self) -> None:
         bounds = SafetyBounds.from_files(self.settings, self.calibration)
         waypoints, frames = dance.build_plan(bounds, 1.0)
-        self.assertEqual(frames[0], dance.HOME)
-        self.assertEqual(frames[-1], dance.HOME)
+        self.assertEqual(frames[0], HOME_POSE)
+        self.assertEqual(frames[-1], HOME_POSE)
         self.assertGreater(len(frames), len(waypoints))
         self.assertGreater(max(frame[4] for frame in frames) - min(frame[4] for frame in frames), 750)
         for pose in frames:
@@ -70,7 +70,7 @@ class DanceDemoTests(unittest.TestCase):
         output = io.StringIO()
         # If a future change imports the runtime on the offline path, this
         # missing-module sentinel exposes it without attaching any hardware.
-        with patch.dict(sys.modules, {"care_reach.hardware.arm_runtime": None}):
+        with patch.dict(sys.modules, {"care_reach.hardware.bus": None, "care_reach.hardware.arm_runtime": None}):
             with contextlib.redirect_stdout(output):
                 result = dance.main(
                     ["--settings", str(self.settings), "--calibration", str(self.calibration)]
@@ -85,7 +85,7 @@ class DanceDemoTests(unittest.TestCase):
                 dance.build_plan(bounds, invalid)
         tight = Path(self.temp.name) / "tight.json"
         tight.write_text(
-            json.dumps({str(i): {"lower": 1990, "upper": 2010} for i in range(1, 7)})
+            json.dumps({str(i): {"lower": 1990, "upper": 2010, "scale": 1} for i in range(1, 7)})
         )
         with self.assertRaises(ValueError):
             dance.build_plan(SafetyBounds.from_files(tight, self.calibration), 0.5)

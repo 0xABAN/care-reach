@@ -3,21 +3,22 @@
 import unittest
 from unittest.mock import patch
 
+from care_reach.robot import JOINT_NAMES
 from care_reach.routines import home
 
 
 class FakeBus:
-    def __init__(self, _port, motors):
-        self.positions = dict(zip(motors, (2004, 1770, 2215, 2024, 2001, 1997)))
+    def __init__(self, _port):
+        self.positions = dict(zip(JOINT_NAMES, (2004, 1770, 2215, 2024, 2001, 1997), strict=True))
         self.registers = {
-            "Min_Position_Limit": {name: 0 for name in motors},
-            "Max_Position_Limit": {name: 4095 for name in motors},
-            "Torque_Enable": {name: 1 for name in motors},
-            "Status": {name: 0 for name in motors},
-            "Present_Voltage": {name: 53 for name in motors},
-            "P_Coefficient": {name: 32 for name in motors},
-            "Goal_Speed": {name: 2 for name in motors},
-            "Acceleration": {name: 3 for name in motors},
+            "Min_Position_Limit": {name: 0 for name in JOINT_NAMES},
+            "Max_Position_Limit": {name: 4095 for name in JOINT_NAMES},
+            "Torque_Enable": {name: 1 for name in JOINT_NAMES},
+            "Status": {name: 0 for name in JOINT_NAMES},
+            "Present_Voltage": {name: 53 for name in JOINT_NAMES},
+            "P_Coefficient": {name: 32 for name in JOINT_NAMES},
+            "Goal_Speed": {name: 2 for name in JOINT_NAMES},
+            "Acceleration": {name: 3 for name in JOINT_NAMES},
         }
         self.disconnected_with = None
 
@@ -45,12 +46,12 @@ class HomeTests(unittest.TestCase):
     def test_speed_four_moves_all_joints_and_preserves_torque(self):
         created = []
 
-        def factory(port, motors):
-            bus = FakeBus(port, motors)
+        def factory(port):
+            bus = FakeBus(port)
             created.append(bus)
             return bus
 
-        with patch.object(home, "SerialMotorsBus", factory), patch.object(home.time, "sleep") as sleep:
+        with patch.object(home, "make_bus", factory), patch.object(home.time, "sleep") as sleep:
             home.main(["--speed", "4", "--port", "unused"])
         bus = created[0]
         self.assertTrue(all(abs(value - 2000) <= home.TOLERANCE for value in bus.positions.values()))
