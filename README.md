@@ -1,5 +1,5 @@
 # care-reach
 
+## ROS setup
 
-
-example README.md
+See [ros2/README.md](ros2/README.md) for the local ROS 2 Jazzy setup for the SO-101 robot.
