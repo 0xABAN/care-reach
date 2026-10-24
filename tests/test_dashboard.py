@@ -788,6 +788,33 @@ class HttpHostTests(unittest.TestCase):
         self.assertEqual(status, 503)
         self.assertEqual(payload, {"error": "Camera unavailable"})
 
+    def test_ultrasonic_readout_is_independent_and_sanitized(self):
+        page = (Path(__file__).resolve().parents[1] / "static" / "index.html").read_text()
+        self.assertIn('id="range-card"', page)
+        self.assertIn("'/api/ultrasonic'", page)
+        self.assertIn("setInterval(refreshRange, 200)", page)
+
+        sample = {"status": "ok", "distance_cm": 42.25, "sample_age_ms": 80,
+                  "updated_at": "2026-10-24T22:00:00Z", "private": "do not proxy"}
+        with patch("server.urlopen", return_value=io.BytesIO(json.dumps(sample).encode())) as request:
+            status, state = self.call(self.handler, {"Host": "pi.local:8765"},
+                                      path="/api/ultrasonic")
+        self.assertEqual((status, state), (200, {"status": "ok", "distance_cm": 42.25,
+                                                 "sample_age_ms": 80,
+                                                 "updated_at": "2026-10-24T22:00:00Z"}))
+        request.assert_called_once_with("http://127.0.0.1:8767/state", timeout=1)
+
+        with patch("server.urlopen", side_effect=OSError("sensor offline")):
+            status, state = self.call(self.handler, {"Host": "pi.local:8765"},
+                                      path="/api/ultrasonic")
+        self.assertEqual((status, state), (503, {"error": "Ultrasonic service unavailable"}))
+
+        with patch("server.urlopen", return_value=io.BytesIO(
+                b'{"status":"ok","distance_cm":NaN,"sample_age_ms":80}')):
+            status, state = self.call(self.handler, {"Host": "pi.local:8765"},
+                                      path="/api/ultrasonic")
+        self.assertEqual(status, 503)
+
     def test_accepts_pi_local_pi_and_loopback_hosts(self):
         for host in ("pi.local:8765", "pi:8765", "localhost:8765", "127.0.0.1:8765"):
             status, payload = self.call(self.handler, {"Host": host}, client_ip="127.0.0.1")

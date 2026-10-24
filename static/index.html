@@ -51,11 +51,19 @@
     [hidden] { display: none !important; }
     .tabs { display: flex; gap: 8px; margin-bottom: 20px; border-bottom: 1px solid #33454f; padding-bottom: 10px; }
     .tabs button[aria-selected="true"] { background: #197f86; border-color: #7ed7dc; font-weight: 700; }
-    .camera-view { display: block; width: 100%; max-width: 960px; height: auto; margin-top: 14px; background: #1c2a32; border: 1px solid #33454f; border-radius: 14px; }
+    .camera-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(240px, 300px); align-items: start; gap: 14px; margin-top: 14px; }
+    .camera-view { display: block; width: 100%; height: auto; background: #1c2a32; border: 1px solid #33454f; border-radius: 14px; }
+    .range-card { min-height: 185px; padding: 19px; background: #1c2a32; border: 1px solid #33454f; border-radius: 14px; }
+    .range-card[data-state="ok"] { border-color: #559aa0; }
+    .range-card[data-state="stale"], .range-card[data-state="error"] { border-color: #bf6268; }
+    .range-value { margin: 10px 0 6px; font-size: clamp(2.5rem, 5vw, 4rem); font-weight: 750; letter-spacing: -.045em; line-height: 1; font-variant-numeric: tabular-nums; }
+    .range-unit { font-size: 1.25rem; color: #aebec7; font-weight: 500; letter-spacing: 0; }
+    .range-note { margin: 0; color: #aebec7; }
     .history { margin: 16px 0; color: #aebec7; }
     .history summary { cursor: pointer; }
     .history ul { margin: 8px 0; padding-left: 22px; }
     @media (max-width: 1000px) { .joint { grid-template-columns: 1fr 1fr; } }
+    @media (max-width: 700px) { .camera-layout { grid-template-columns: 1fr; } }
     @media (max-width: 600px) { body { padding: 14px; } .top { flex-direction: column; } .top-actions { width: 100%; } .top-actions button { flex: 1; white-space: normal; } .joint { grid-template-columns: 1fr; } }
   </style>
 </head>
@@ -79,7 +87,14 @@
     <section id="camera-panel" role="tabpanel" aria-labelledby="tab-camera" hidden>
       <h1>Live camera</h1>
       <p class="subtitle muted">Feed from the USB camera connected to the Pi.</p>
-      <img id="camera-feed" class="camera-view" alt="Live view from the Pi camera">
+      <div class="camera-layout">
+        <img id="camera-feed" class="camera-view" alt="Live view from the Pi camera">
+        <section id="range-card" class="range-card" data-state="waiting" aria-labelledby="range-heading">
+          <div class="group-label" id="range-heading">Ultrasonic distance</div>
+          <div class="range-value"><span id="range-value">—</span><span class="range-unit" id="range-unit"></span></div>
+          <p class="range-note" id="range-note" role="status">Waiting for sensor data…</p>
+        </section>
+      </div>
       <p id="camera-error" class="muted" hidden>Camera feed unavailable. Check the camera service on the Pi.</p>
     </section>
   </main>
@@ -87,16 +102,53 @@
     const joints = document.getElementById('joints');
     const statusBox = document.getElementById('status');
     const cameraFeed = document.getElementById('camera-feed');
+    const cameraPanel = document.getElementById('camera-panel');
+    const rangeCard = document.getElementById('range-card');
+    const rangeValue = document.getElementById('range-value');
+    const rangeUnit = document.getElementById('range-unit');
+    const rangeNote = document.getElementById('range-note');
+    let rangeRequest = null;
+
+    function renderRange(state, distance, note) {
+      rangeCard.dataset.state = state;
+      rangeValue.textContent = distance === null ? '—' : distance.toFixed(1);
+      rangeUnit.textContent = distance === null ? '' : ' cm';
+      rangeNote.textContent = note;
+    }
+
+    async function refreshRange() {
+      if (cameraPanel.hidden || document.hidden || rangeRequest) return;
+      const request = new AbortController();
+      rangeRequest = request;
+      try {
+        const response = await fetch('/api/ultrasonic', {cache: 'no-store', signal: request.signal});
+        const reading = await response.json();
+        if (!response.ok) throw new Error(reading.error || 'Sensor unavailable');
+        if (cameraPanel.hidden || document.hidden) return;
+        const fresh = reading.status === 'ok' && Number.isFinite(reading.distance_cm) &&
+          Number.isInteger(reading.sample_age_ms) && reading.sample_age_ms <= 1500;
+        if (fresh) renderRange('ok', reading.distance_cm, `Updated ${Math.max(0, reading.sample_age_ms)} ms ago`);
+        else if (reading.status === 'waiting') renderRange('waiting', null, 'Waiting for Arduino data…');
+        else if (reading.status === 'error') renderRange('error', null, 'Sensor error. Check the Arduino connection.');
+        else renderRange('stale', null, 'No recent distance reading.');
+      } catch (error) {
+        if (error.name !== 'AbortError' && !cameraPanel.hidden && !document.hidden)
+          renderRange('error', null, 'Sensor feed unavailable.');
+      } finally {
+        if (rangeRequest === request) rangeRequest = null;
+      }
+    }
+
     function showTab(name) {
       endPress();
       const camera = name === 'camera';
       document.getElementById('controls-panel').hidden = camera;
-      document.getElementById('camera-panel').hidden = !camera;
+      cameraPanel.hidden = !camera;
       document.getElementById('tab-controls').setAttribute('aria-selected', String(!camera));
       document.getElementById('tab-camera').setAttribute('aria-selected', String(camera));
       document.getElementById('camera-error').hidden = true;
-      if (camera) cameraFeed.src = '/camera/stream';
-      else cameraFeed.removeAttribute('src');
+      if (camera) { cameraFeed.src = '/camera/stream'; refreshRange(); }
+      else { cameraFeed.removeAttribute('src'); if (rangeRequest) rangeRequest.abort(); }
     }
     document.getElementById('tab-controls').addEventListener('click', () => showTab('controls'));
     document.getElementById('tab-camera').addEventListener('click', () => showTab('camera'));
@@ -318,6 +370,7 @@
     window.addEventListener('pagehide', endPress);
     refresh(); setInterval(refresh, 1000);
     refreshTranscription(); setInterval(refreshTranscription, 2000);
+    setInterval(refreshRange, 200);
   </script>
 </body>
 </html>

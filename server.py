@@ -926,6 +926,7 @@ def motor_id(value):
 
 ACCEPTED_HOSTNAMES = ("localhost", "127.0.0.1", "pi", "pi.local")
 VOICE_URL = "http://127.0.0.1:8770"
+ULTRASONIC_URL = "http://127.0.0.1:8767/state"
 
 
 def voice_state():
@@ -942,6 +943,28 @@ def set_voice_enabled(enabled):
     with urlopen(request, timeout=3) as response:
         response.read()
     return {"enabled": enabled}
+
+
+def ultrasonic_state():
+    """Read the separate sensor service without opening the arm's serial bus."""
+    with urlopen(ULTRASONIC_URL, timeout=1) as response:
+        state = json.loads(response.read(4096))
+    if not isinstance(state, dict) or state.get("status") not in {"ok", "waiting", "stale", "error"}:
+        raise ValueError("Invalid ultrasonic status")
+    distance = state.get("distance_cm")
+    if distance is not None:
+        if (isinstance(distance, bool) or not isinstance(distance, (int, float))
+                or not math.isfinite(distance) or not 0 <= distance <= 1000):
+            raise ValueError("Invalid ultrasonic distance")
+        distance = float(distance)
+    age = state.get("sample_age_ms")
+    if age is not None and (type(age) is not int or not 0 <= age <= 86_400_000):
+        raise ValueError("Invalid ultrasonic sample age")
+    updated = state.get("updated_at")
+    if updated is not None and (not isinstance(updated, str) or len(updated) > 64):
+        raise ValueError("Invalid ultrasonic sample time")
+    return {"status": state["status"], "distance_cm": distance,
+            "sample_age_ms": age, "updated_at": updated}
 
 
 def handler_for(arm, port):
@@ -1027,6 +1050,12 @@ def handler_for(arm, port):
                 except (OSError, URLError, ValueError, KeyError, TypeError) as exc:
                     logging.warning("Voice service unavailable: %s", type(exc).__name__)
                     self.reply(503, {"error": "Transcription service unavailable"})
+            elif path == "/api/ultrasonic":
+                try:
+                    self.reply(200, ultrasonic_state())
+                except (OSError, URLError, ValueError, KeyError, TypeError) as exc:
+                    logging.warning("Ultrasonic service unavailable: %s", type(exc).__name__)
+                    self.reply(503, {"error": "Ultrasonic service unavailable"})
             elif path == "/api/diagnostics":
                 try:
                     self.reply(200, arm.diagnostics())
