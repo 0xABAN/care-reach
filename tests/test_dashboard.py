@@ -556,15 +556,16 @@ class HttpHostTests(unittest.TestCase):
         self.handler = handler_for(arm, 8765)
 
     @staticmethod
-    def call(handler_class, headers, client_ip="192.168.1.23", local_ip="192.168.1.42"):
+    def call(handler_class, headers, client_ip="192.168.1.23", local_ip="192.168.1.42",
+             path="/api/state", parse_json=True):
         handler = handler_class.__new__(handler_class)
-        handler.path = "/api/state"
+        handler.path = path
         handler.headers = headers
         handler.client_address = (client_ip, 43210)
         handler.connection = type("FakeConnection", (), {"getsockname": lambda self: (local_ip, 8765)})()
         handler.wfile = io.BytesIO()
         handler._headers_buffer = []
-        handler.requestline = "GET /api/state HTTP/1.1"
+        handler.requestline = f"GET {path} HTTP/1.1"
         handler.request_version = "HTTP/1.1"
         handler.server_version = "Fake/1.0"
         handler.sys_version = "Python/3"
@@ -573,7 +574,32 @@ class HttpHostTests(unittest.TestCase):
         raw = handler.wfile.getvalue()
         header_blob, _, payload = raw.partition(b"\r\n\r\n")
         status = int(header_blob.split(b" ", 2)[1])
-        return status, json.loads(payload)
+        return status, json.loads(payload) if parse_json else (header_blob, payload)
+
+    def test_camera_tab_and_same_origin_stream(self):
+        page = (Path(__file__).resolve().parents[1] / "static" / "index.html").read_text()
+        self.assertIn('id="tab-camera"', page)
+        self.assertIn('id="camera-panel"', page)
+        self.assertIn("'/camera/stream'", page)
+
+        class FakeCamera(io.BytesIO):
+            headers = {"Content-Type": "multipart/x-mixed-replace;boundary=frame"}
+
+        with patch("server.urlopen", return_value=FakeCamera(b"--frame\r\nJPEG\r\n")) as open_camera:
+            status, (headers, body) = self.call(
+                self.handler, {"Host": "pi.local:8765"},
+                path="/camera/stream", parse_json=False,
+            )
+        self.assertEqual(status, 200)
+        self.assertIn(b"multipart/x-mixed-replace;boundary=frame", headers)
+        self.assertEqual(body, b"--frame\r\nJPEG\r\n")
+        open_camera.assert_called_once_with("http://127.0.0.1:8766/stream", timeout=5)
+
+    def test_camera_unavailable_returns_503(self):
+        with patch("server.urlopen", side_effect=OSError("camera offline")):
+            status, payload = self.call(self.handler, {"Host": "pi.local:8765"}, path="/camera/stream")
+        self.assertEqual(status, 503)
+        self.assertEqual(payload, {"error": "Camera unavailable"})
 
     def test_accepts_pi_local_pi_and_loopback_hosts(self):
         for host in ("pi.local:8765", "pi:8765", "localhost:8765", "127.0.0.1:8765"):

@@ -45,12 +45,21 @@
     .goto { grid-column: 1 / -1; display: flex; align-items: end; gap: 8px; flex-wrap: wrap; }
     .goto input { width: 120px; min-height: 41px; padding: 8px; border-radius: 9px; border: 1px solid #506570; background: #10191f; color: inherit; font: inherit; }
     .hint { margin: 18px 0; font-size: .9rem; }
+    [hidden] { display: none !important; }
+    .tabs { display: flex; gap: 8px; margin-bottom: 20px; border-bottom: 1px solid #33454f; padding-bottom: 10px; }
+    .tabs button[aria-selected="true"] { background: #197f86; border-color: #7ed7dc; font-weight: 700; }
+    .camera-view { display: block; width: 100%; max-width: 960px; height: auto; margin-top: 14px; background: #1c2a32; border: 1px solid #33454f; border-radius: 14px; }
     @media (max-width: 1000px) { .joint { grid-template-columns: 1fr 1fr; } }
     @media (max-width: 600px) { body { padding: 14px; } .top { flex-direction: column; } .top-actions { width: 100%; } .top-actions button { flex: 1; white-space: normal; } .joint { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
   <main>
+    <nav class="tabs" role="tablist" aria-label="Dashboard views">
+      <button id="tab-controls" role="tab" aria-controls="controls-panel" aria-selected="true">Controls</button>
+      <button id="tab-camera" role="tab" aria-controls="camera-panel" aria-selected="false">Camera</button>
+    </nav>
+    <section id="controls-panel" role="tabpanel" aria-labelledby="tab-controls">
     <div class="top">
       <div><h1>SO-101 Joint Control</h1><p class="subtitle muted">Hold a direction to move any joint. Release to hold its measured position.</p><p class="subtitle muted" id="folded-pose"></p></div>
       <div class="top-actions"><button class="pose" id="pose-home">Home</button><button class="pose" id="pose-fold">Fold</button><button class="pose" id="pose-dance">Dance</button><button class="hold-all" id="hold-all">Hold all joints</button><button class="release" id="release" disabled title="Set and verify the coiled rest pose first">Torque release unavailable</button></div>
@@ -58,10 +67,32 @@
     <div id="status" class="status">Connecting to the arm…</div>
     <div id="joints" class="grid"></div>
     <p class="hint muted">Forward increases encoder ticks. Saved joint limits are shown read-only; hold speed is 1×, 2×, 4×, or 8×. Home, Fold, and Dance move all six joints; Dance homes first and returns Home. Press the active button again to cancel. Torque remains on when a hold ends or this panel closes.</p>
+    </section>
+    <section id="camera-panel" role="tabpanel" aria-labelledby="tab-camera" hidden>
+      <h1>Live camera</h1>
+      <p class="subtitle muted">Feed from the USB camera connected to the Pi.</p>
+      <img id="camera-feed" class="camera-view" alt="Live view from the Pi camera">
+      <p id="camera-error" class="muted" hidden>Camera feed unavailable. Check the camera service on the Pi.</p>
+    </section>
   </main>
   <script>
     const joints = document.getElementById('joints');
     const statusBox = document.getElementById('status');
+    const cameraFeed = document.getElementById('camera-feed');
+    function showTab(name) {
+      endPress();
+      const camera = name === 'camera';
+      document.getElementById('controls-panel').hidden = camera;
+      document.getElementById('camera-panel').hidden = !camera;
+      document.getElementById('tab-controls').setAttribute('aria-selected', String(!camera));
+      document.getElementById('tab-camera').setAttribute('aria-selected', String(camera));
+      document.getElementById('camera-error').hidden = true;
+      if (camera) cameraFeed.src = '/camera/stream';
+      else cameraFeed.removeAttribute('src');
+    }
+    document.getElementById('tab-controls').addEventListener('click', () => showTab('controls'));
+    document.getElementById('tab-camera').addEventListener('click', () => showTab('camera'));
+    cameraFeed.addEventListener('error', () => { document.getElementById('camera-error').hidden = false; });
     let press = null;
     let rowsBuilt = false;
     let lastState = null;

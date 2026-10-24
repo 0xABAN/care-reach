@@ -14,7 +14,9 @@ import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.error import URLError
 from urllib.parse import urlsplit
+from urllib.request import urlopen
 
 from serial.tools import list_ports
 from lerobot.motors import Motor, MotorNormMode, SerialMotorsBus
@@ -733,7 +735,29 @@ def handler_for(arm, port):
             if not self.allowed():
                 return
             path = urlsplit(self.path).path
-            if path == "/":
+            if path in ("/camera/stream", "/camera/snapshot"):
+                upstream_path = "/stream" if path.endswith("stream") else "/snapshot"
+                try:
+                    upstream = urlopen(f"http://127.0.0.1:8766{upstream_path}", timeout=5)
+                except (OSError, URLError) as exc:
+                    logging.warning("Camera unavailable: %s", exc)
+                    self.reply(503, {"error": "Camera unavailable"})
+                    return
+                with upstream:
+                    self.send_response(200)
+                    self.send_header("Content-Type", upstream.headers.get("Content-Type", "image/jpeg"))
+                    self.send_header("Cache-Control", "no-store")
+                    if path == "/camera/snapshot":
+                        length = upstream.headers.get("Content-Length")
+                        if length:
+                            self.send_header("Content-Length", length)
+                    self.end_headers()
+                    try:
+                        while chunk := upstream.read(16 * 1024):
+                            self.wfile.write(chunk)
+                    except (BrokenPipeError, ConnectionResetError, TimeoutError):
+                        pass  # Viewer closed the tab or disconnected.
+            elif path == "/":
                 body = (ROOT / "static" / "index.html").read_bytes()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
