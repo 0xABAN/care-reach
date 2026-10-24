@@ -22,6 +22,8 @@ class FakeBus:
         self.torque = {name: torque for name in JOINT_NAMES}
         self.loads = {name: 0 for name in JOINT_NAMES}
         self.status = {name: 0 for name in JOINT_NAMES}
+        self.voltages = {name: 53 for name in JOINT_NAMES}
+        self.currents = {name: 0 for name in JOINT_NAMES}
         self.connected = False
         self.writes = []
         self.disconnects = []
@@ -44,7 +46,8 @@ class FakeBus:
             "Max_Position_Limit": {name: 4095 for name in JOINT_NAMES},
             "Operating_Mode": {name: 0 for name in JOINT_NAMES},
             "Status": self.status,
-            "Present_Voltage": {name: 53 for name in JOINT_NAMES},
+            "Present_Voltage": self.voltages,
+            "Present_Current": self.currents,
             "Present_Temperature": {name: 24 for name in JOINT_NAMES},
             "Present_Load": self.loads,
         }
@@ -101,7 +104,8 @@ class DashboardBase(unittest.TestCase):
         thread_patch.start()
         self.addCleanup(thread_patch.stop)
         arm = Arm("fake", bus_factory=lambda _: bus, settings_path=self.settings_path,
-                  calibration_path=self.calibration_path, pose_path=self.pose_path)
+                  calibration_path=self.calibration_path, pose_path=self.pose_path,
+                  telemetry_path=self.settings_path.parent / "telemetry.jsonl")
         self.addCleanup(arm.close)
         return arm
 
@@ -153,13 +157,39 @@ class DashboardTests(DashboardBase):
         with self.assertRaisesRegex(RuntimeError, "Motor 6 servo fault 32"):
             arm.pose_start("home")
 
-    def test_inactive_voltage_alarm_still_blocks_a_jog(self):
+    def test_existing_inactive_voltage_alarm_allows_healthy_jog(self):
         bus = FakeBus((2000,) * 6)
         bus.status["gripper"] = 1
         arm = self.arm(bus)
+        token = arm.start(1, 1)
+        arm._advance(time.monotonic() + 0.08)
+        arm.stop(token)
+        self.assertTrue(all(write[1] == "shoulder_pan" for write in bus.writes))
+
+    def test_new_inactive_voltage_alarm_stops_motion(self):
+        bus = FakeBus((2000,) * 6)
+        arm = self.arm(bus)
+        arm.start(1, 1)
+        bus.status["gripper"] = 1
         with self.assertRaisesRegex(RuntimeError, "Motor 6 voltage alarm"):
+            arm._advance(time.monotonic() + 0.08)
+        records = [json.loads(line) for line in (self.settings_path.parent / "telemetry.jsonl").read_text().splitlines()]
+        self.assertTrue(any(record["event"] == "status_changed" for record in records))
+
+    def test_inactive_low_voltage_still_blocks_motion(self):
+        bus = FakeBus((2000,) * 6)
+        bus.voltages["gripper"] = 47
+        arm = self.arm(bus)
+        with self.assertRaisesRegex(RuntimeError, "Motor 6 voltage stayed low"):
             arm.start(1, 1)
-        self.assertEqual(bus.writes, [])
+
+    def test_voltage_error_clears_after_stable_recovery(self):
+        arm = self.arm(FakeBus((2000,) * 6))
+        arm._set_error("Motor 6 voltage stayed low")
+        arm.healthy_since = time.monotonic() - 3
+        state = arm.state()
+        self.assertIsNone(state["error"])
+        self.assertTrue(any(event["event"] == "voltage_recovered" for event in state["recent_events"]))
 
     def test_folded_endpoint_only_allows_motion_toward_normal_limits(self):
         bus = FakeBus((2040, 893, 3064, 2888, 2416, 1470))
@@ -577,7 +607,8 @@ class HttpHostTests(unittest.TestCase):
         thread_patch.start()
         self.addCleanup(thread_patch.stop)
         arm = Arm("fake", bus_factory=lambda _: FakeBus((2000,) * 6), settings_path=self.settings_path,
-                  calibration_path=self.calibration_path, pose_path=self.pose_path)
+                  calibration_path=self.calibration_path, pose_path=self.pose_path,
+                  telemetry_path=self.settings_path.parent / "telemetry.jsonl")
         self.addCleanup(arm.close)
         self.handler = handler_for(arm, 8765)
 
