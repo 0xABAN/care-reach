@@ -1,14 +1,13 @@
 """Fake-bus dashboard checks. These tests never open a serial device."""
 
 import json
-import tempfile
 import time
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
 from care_reach.dashboard.panel import PanelController
 from care_reach.robot import JOINT_NAMES
+from tests.support import FOLDED_TICKS, ArmFilesTestCase
 
 
 class FakeBus:
@@ -57,40 +56,13 @@ class FakeBus:
         self.writes.append((register, values.copy()))
 
 
-class DashboardTests(unittest.TestCase):
-    def setUp(self):
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        root = Path(temporary.name)
-        ranges = [(1096, 2617), (883, 3243), (861, 3007), (843, 3130), (0, 4095), (1317, 2762)]
-        calibration = {
-            name: {"range_min": lo, "range_max": hi}
-            for name, (lo, hi) in zip(JOINT_NAMES, ranges, strict=True)
-        }
-        settings = {
-            str(index): {"lower": lo, "upper": hi, "scale": 1}
-            for index, (lo, hi) in enumerate(
-                ((1116, 2597), (903, 3223), (881, 2987), (863, 3110), (None, None), (1317, 2742)), 1
-            )
-        }
-        folded = (2040, 893, 3064, 2888, 2416, 1470)
-        pose = {
-            "robot_id": "care_reach_follower",
-            "positions_ticks": dict(zip(JOINT_NAMES, folded, strict=True)),
-        }
-        self.settings_path = root / "joint_settings.json"
-        self.calibration_path = root / "calibration.json"
-        self.pose_path = root / "folded_pose.json"
-        self.settings_path.write_text(json.dumps(settings), encoding="utf-8")
-        self.calibration_path.write_text(json.dumps(calibration), encoding="utf-8")
-        self.pose_path.write_text(json.dumps(pose), encoding="utf-8")
-
+class DashboardTests(ArmFilesTestCase):
     def arm(self, bus):
         thread_patch = patch("care_reach.dashboard.panel.threading.Thread")
         thread_patch.start()
         self.addCleanup(thread_patch.stop)
         arm = PanelController("fake", bus_factory=lambda _: bus, settings_path=self.settings_path,
-                  calibration_path=self.calibration_path, pose_path=self.pose_path)
+                              calibration_path=self.calibration_path, pose_path=self.pose_path)
         self.addCleanup(arm.close)
         return arm
 
@@ -119,7 +91,7 @@ class DashboardTests(unittest.TestCase):
         self.assertTrue(all(value == 1 for value in bus.torque.values()))
 
     def test_folded_endpoint_only_allows_motion_toward_normal_limits(self):
-        bus = FakeBus((2040, 893, 3064, 2888, 2416, 1470))
+        bus = FakeBus(FOLDED_TICKS)
         arm = self.arm(bus)
         state = arm.state()["motors"]
         self.assertTrue(state[1]["can_forward"])
@@ -138,7 +110,7 @@ class DashboardTests(unittest.TestCase):
         self.assertFalse(arm.state()["motors"][2]["can_forward"])
 
     def test_explicit_hold_can_enable_a_torque_off_arm(self):
-        bus = FakeBus((2040, 893, 3064, 2888, 2416, 1470), torque=0)
+        bus = FakeBus(FOLDED_TICKS, torque=0)
         arm = self.arm(bus)
         self.assertTrue(arm.state()["hold_all_enabled"])
         with self.assertRaisesRegex(RuntimeError, "torque is off"):

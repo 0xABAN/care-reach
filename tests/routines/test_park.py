@@ -3,47 +3,19 @@
 import json
 import math
 import sys
-import tempfile
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
 from care_reach.motion.bounds import SafetyBounds, UnsafePoseError, validate_pose
 from care_reach.robot import HOME_POSE, JOINT_NAMES, load_folded_pose
 from care_reach.routines.park import FOLD_VMAX, build_plan, folded_bounds, main
+from tests.support import FOLDED_TICKS, ArmFilesTestCase
 
 
-class ParkTests(unittest.TestCase):
-    def setUp(self):
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        directory = Path(temporary.name)
-        ranges = [(1096, 2617), (883, 3243), (861, 3007), (843, 3130), (0, 4095), (1317, 2762)]
-        calibration = {
-            name: {"id": index, "range_min": lo, "range_max": hi}
-            for index, (name, (lo, hi)) in enumerate(zip(JOINT_NAMES, ranges), 1)
-        }
-        settings = {
-            str(index): {"lower": lo, "upper": hi, "scale": 1}
-            for index, (lo, hi) in enumerate(
-                [(1116, 2597), (903, 3223), (881, 2987), (863, 3110), (None, None), (1317, 2742)], 1
-            )
-        }
-        self.calibration = calibration
-        self.calibration_path = directory / "calibration.json"
-        self.settings_path = directory / "settings.json"
-        self.pose_path = directory / "folded_pose.json"
-        self.calibration_path.write_text(json.dumps(calibration), encoding="utf-8")
-        self.settings_path.write_text(json.dumps(settings), encoding="utf-8")
-        self.pose_path.write_text(json.dumps({
-            "robot_id": "care_reach_follower",
-            "positions_ticks": dict(zip(JOINT_NAMES, (2040, 893, 3064, 2888, 2416, 1470), strict=True)),
-        }), encoding="utf-8")
-        self.bounds = SafetyBounds.from_files(self.settings_path, self.calibration_path)
-
+class ParkTests(ArmFilesTestCase):
     def test_manually_measured_fold_is_saved_exactly(self):
         target = load_folded_pose(self.pose_path)
-        self.assertEqual(target, (2040, 893, 3064, 2888, 2416, 1470))
+        self.assertEqual(target, FOLDED_TICKS)
         with self.assertRaisesRegex(UnsafePoseError, "motor 2"):
             validate_pose(target, self.bounds)
         with self.assertRaisesRegex(UnsafePoseError, "motor 3"):
