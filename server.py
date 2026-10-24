@@ -19,8 +19,8 @@ from urllib.parse import urlsplit
 from serial.tools import list_ports
 from lerobot.motors import Motor, MotorNormMode, SerialMotorsBus
 
-from motion_core import JOINT_NAMES, SafetyBounds
-from park import folded_target
+from motion_core import JOINT_NAMES, SafetyBounds, validate_pose
+from park import HOME, folded_bounds, folded_target
 
 
 ROOT = Path(__file__).resolve().parent
@@ -38,6 +38,13 @@ LEASE_SECONDS = 0.75
 MIN_VOLTAGE_RAW = 48
 MAX_LOAD = 900
 POSITION_TOLERANCE = 15
+POSE_STEP_SECONDS = 0.06
+POSE_MAX_LEAD = 80
+POSE_TOLERANCE = 35
+POSE_TIMEOUT_SECONDS = 40
+POSE_STALL_SECONDS = 2.0
+POSE_STALL_TICKS = 3
+POSE_MEASURED_OVERSHOOT = 5
 
 
 def find_port():
@@ -129,10 +136,6 @@ class Arm:
             for name in JOINT_NAMES
         }
 
-    def _refresh_bounds(self):
-        self.bounds = SafetyBounds.from_files(self.settings_path, self.calibration_path)
-        self.park_bounds = self._fold_envelope(self.bounds)
-
     def _fold_envelope(self, bounds):
         # The manually observed endpoint only permits a way back inside a
         # tighter saved bound. It is never an outward jog destination.
@@ -155,7 +158,7 @@ class Arm:
             return low, position, True, False
         return low, high, position > low, position < high
 
-    def _check_snapshot(self, snapshot, *, need_torque=True):
+    def _check_snapshot(self, snapshot, *, need_torque=True, bounds=None, overshoot=0):
         for index, name in enumerate(JOINT_NAMES):
             joint = snapshot[name]
             if joint["status"] != 0:
@@ -170,7 +173,12 @@ class Arm:
             position = joint["position"]
             if not self.firmware_min[name] <= position <= self.firmware_max[name]:
                 raise RuntimeError(f"Motor {index + 1} exceeds firmware position bounds")
-            self._safe_span(index, position)
+            if bounds is not None:
+                low, high = bounds.lower[index], bounds.upper[index]
+                if not low - overshoot <= position <= high + overshoot:
+                    raise RuntimeError(f"Motor {index + 1} measured position {position} exceeds [{low}, {high}]")
+            else:
+                self._safe_span(index, position)
 
     def _write_goal(self, motor, tick):
         name = JOINT_NAMES[motor - 1]
@@ -214,6 +222,9 @@ class Arm:
         self.hold = None
         if not previous:
             return
+        if previous["mode"] == "pose":
+            self._hold_measured_all()
+            return
         if settle and previous["mode"] == "jog":
             name = JOINT_NAMES[previous["motor"] - 1]
             if self._read("Torque_Enable")[name] != 1:
@@ -222,6 +233,23 @@ class Arm:
             self._write_goal(previous["motor"], self._settle_goal(previous, name, position))
         else:
             self._hold_measured(previous["motor"])
+
+    def _hold_measured_all(self):
+        """Command every enabled joint to its measured position; never torque off."""
+        torque = self._read("Torque_Enable")
+        if not any(value == 1 for value in torque.values()):
+            return
+        positions = self._read("Present_Position")
+        goals = {}
+        for index, name in enumerate(JOINT_NAMES):
+            if torque[name] != 1:
+                continue
+            position = positions[name]
+            goal = max(self.park_bounds.lower[index], min(self.park_bounds.upper[index], position))
+            goal = max(self.firmware_min[name], min(self.firmware_max[name], goal))
+            goals[name] = int(goal)
+        if goals:
+            self.bus.sync_write("Goal_Position", goals, normalize=False)
 
     def state(self):
         with self.lock:
@@ -250,11 +278,19 @@ class Arm:
                     "motion_enabled": enabled,
                     **setting,
                 })
+            pose = self.hold if self.hold is not None and self.hold["mode"] == "pose" else None
             return {
                 "motors": motors, "holding": self.hold["motor"] if self.hold else None,
                 "error": self.error, "motion_enabled": all_powered,
                 "hold_all_enabled": not all_powered and not any(m["fault"] for m in motors),
                 "folded_ticks": dict(zip(JOINT_NAMES, self.folded, strict=True)),
+                "pose": {
+                    "active": pose is not None,
+                    "name": pose["pose"] if pose else None,
+                    "progress": pose["progress"] if pose else 0.0,
+                    "target": dict(zip(JOINT_NAMES, pose["target"], strict=True)) if pose else None,
+                    "positions": pose["measured"] if pose else None,
+                },
             }
 
     def diagnostics(self):
@@ -276,6 +312,8 @@ class Arm:
 
     def start(self, motor, direction):
         with self.lock:
+            if self.hold is not None and self.hold["mode"] == "pose":
+                raise ValueError("A pose move is in progress; cancel it before jogging")
             self._stop()
             snapshot = self._snapshot()
             self._check_snapshot(snapshot)
@@ -290,6 +328,8 @@ class Arm:
 
     def go(self, target):
         with self.lock:
+            if self.hold is not None and self.hold["mode"] == "pose":
+                raise ValueError("A pose move is in progress; cancel it before using go-to-tick")
             if type(target) is not int:
                 raise ValueError("Target must be an integer tick")
             self._stop()
@@ -302,6 +342,88 @@ class Arm:
             self.hold = self._new_hold(6, "goto", position, target=target)
             self.error = None
             return self.hold["token"]
+
+    def pose_start(self, pose):
+        with self.lock:
+            if self.hold is not None:
+                raise ValueError("A movement is already active; cancel it before starting a pose move")
+            if pose not in ("home", "fold"):
+                raise ValueError("pose must be 'home' or 'fold'")
+            target = HOME if pose == "home" else self.folded
+            envelope = folded_bounds(self.bounds, self.folded)
+            validate_pose(target, envelope)
+            modes = self._read("Operating_Mode")
+            if any(modes[name] != 0 for name in JOINT_NAMES):
+                raise RuntimeError("All motors must be in position mode 0; no modes were changed")
+            for index, name in enumerate(JOINT_NAMES):
+                if not self.firmware_min[name] <= target[index] <= self.firmware_max[name]:
+                    raise RuntimeError(f"Motor {index + 1} target is outside firmware bounds")
+            snapshot = self._snapshot()
+            self._check_snapshot(snapshot, bounds=envelope, overshoot=POSE_MEASURED_OVERSHOOT)
+            self.error = None
+            now = time.monotonic()
+            self.hold = {
+                "token": uuid.uuid4().hex, "motor": None, "mode": "pose", "pose": pose,
+                "target": target, "bounds": envelope,
+                "start_positions": {name: snapshot[name]["position"] for name in JOINT_NAMES},
+                "measured": {name: snapshot[name]["position"] for name in JOINT_NAMES},
+                "progress_position": {name: snapshot[name]["position"] for name in JOINT_NAMES},
+                "progress_time": {name: now for name in JOINT_NAMES},
+                "high_load": {name: 0 for name in JOINT_NAMES},
+                "writes": 0, "progress": 0.0,
+                "next": now, "last_update": now, "expires": now + POSE_TIMEOUT_SECONDS,
+            }
+            return {"token": self.hold["token"], "pose": pose}
+
+    def pose_stop(self):
+        with self.lock:
+            if self.hold is not None and self.hold["mode"] == "pose":
+                self._stop()
+            return {"ok": True}
+
+    def _advance_pose(self, now):
+        hold = self.hold
+        snapshot = self._snapshot()
+        self._check_snapshot(snapshot, bounds=hold["bounds"], overshoot=POSE_MEASURED_OVERSHOOT)
+        targets = hold["target"]
+        envelope = hold["bounds"]
+        positions = {name: snapshot[name]["position"] for name in JOINT_NAMES}
+        hold["measured"] = positions
+        errors = {name: targets[index] - positions[name] for index, name in enumerate(JOINT_NAMES)}
+        remaining = sum(abs(errors[name]) for name in JOINT_NAMES)
+        started = sum(abs(targets[index] - hold["start_positions"][name])
+                      for index, name in enumerate(JOINT_NAMES))
+        hold["progress"] = 0.0 if not started else max(0.0, min(1.0, 1.0 - remaining / started))
+        if all(abs(errors[name]) <= POSE_TOLERANCE for name in JOINT_NAMES):
+            # The previous bounded goal is already near this endpoint. Keep
+            # the exact pose as the holding goal so completion does not snap
+            # the target backward to a still-moving encoder reading.
+            self.bus.sync_write("Goal_Position", dict(zip(JOINT_NAMES, targets, strict=True)), normalize=False)
+            self.hold = None
+            return
+        goals = {}
+        for index, name in enumerate(JOINT_NAMES):
+            load = abs(snapshot[name]["load"])
+            hold["high_load"][name] = hold["high_load"][name] + 1 if load >= MAX_LOAD else 0
+            if hold["high_load"][name] >= 3:
+                raise RuntimeError(f"Motor {index + 1} sustained high load {load}")
+            position = positions[name]
+            if abs(position - hold["progress_position"][name]) >= POSE_STALL_TICKS:
+                hold["progress_position"][name] = position
+                hold["progress_time"][name] = now
+            elif abs(errors[name]) > POSE_TOLERANCE and now - hold["progress_time"][name] >= POSE_STALL_SECONDS:
+                raise RuntimeError(f"Motor {index + 1} stalled at {position}")
+            direction = 1 if errors[name] > 0 else -1
+            goal = position + direction * min(abs(errors[name]), POSE_MAX_LEAD)
+            goal = max(envelope.lower[index], min(envelope.upper[index], goal))
+            goal = max(self.firmware_min[name], min(self.firmware_max[name], goal))
+            if (direction > 0 and goal < position) or (direction < 0 and goal > position):
+                goal = position
+            goals[name] = int(goal)
+        self.bus.sync_write("Goal_Position", goals, normalize=False)
+        hold["writes"] += 1
+        hold["last_update"] = now
+        hold["next"] = now + POSE_STEP_SECONDS
 
     def _new_hold(self, motor, mode, position, *, direction=0, target=None):
         now = time.monotonic()
@@ -333,6 +455,9 @@ class Arm:
         if now >= hold["expires"]:
             self._stop()
             self.error = "Movement timed out and stopped"
+            return
+        if hold["mode"] == "pose":
+            self._advance_pose(now)
             return
         snapshot = self._snapshot()
         self._check_snapshot(snapshot)
@@ -404,27 +529,6 @@ class Arm:
                         logging.exception("Could not hold measured position")
                         self.hold = None
 
-    def limit(self, motor, bound, clear):
-        with self.lock:
-            self._stop()
-            value = None if clear else self._read("Present_Position")[JOINT_NAMES[motor - 1]]
-            entry = self.settings[str(motor)]
-            other = entry["upper" if bound == "lower" else "lower"]
-            if value is not None and other is not None:
-                if (bound == "lower" and value >= other) or (bound == "upper" and value <= other):
-                    raise ValueError("Lower limit must be below upper limit")
-            old = entry[bound]
-            entry[bound] = value
-            try:
-                self._save()
-                self._refresh_bounds()
-            except Exception:
-                entry[bound] = old
-                self._save()
-                self._refresh_bounds()
-                raise
-            return {"motor": motor, "bound": bound, "value": value}
-
     def scale(self, motor, scale):
         with self.lock:
             self.settings[str(motor)]["scale"] = scale
@@ -442,6 +546,8 @@ class Arm:
 
     def hold_all(self):
         with self.lock:
+            if self.hold is not None and self.hold["mode"] == "pose":
+                raise ValueError("A pose move is in progress; cancel it before holding all joints")
             self._stop()
             snapshot = self._snapshot()
             self._check_snapshot(snapshot, need_torque=False)
@@ -576,12 +682,13 @@ def handler_for(arm, port):
                         raise ValueError("token must be a string")
                     arm.stop(token)
                     result = {"ok": True}
-                elif path == "/api/limit":
-                    motor = motor_id(data.get("motor"))
-                    bound = data.get("bound")
-                    if bound not in ("lower", "upper") or type(data.get("clear", False)) is not bool:
-                        raise ValueError("bound must be lower/upper and clear must be boolean")
-                    result = arm.limit(motor, bound, data.get("clear", False))
+                elif path == "/api/pose/start":
+                    pose = data.get("pose")
+                    if pose not in ("home", "fold"):
+                        raise ValueError("pose must be 'home' or 'fold'")
+                    result = arm.pose_start(pose)
+                elif path == "/api/pose/stop":
+                    result = arm.pose_stop()
                 elif path == "/api/scale":
                     motor = motor_id(data.get("motor"))
                     scale = data.get("scale")

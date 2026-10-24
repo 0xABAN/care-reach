@@ -20,6 +20,9 @@
     button:focus-visible { outline: 3px solid #7ed7dc; outline-offset: 2px; }
     button:disabled { opacity: .45; cursor: default; }
     .top-actions { display: flex; gap: 8px; }
+    .pose { background: #2b4a6f; border-color: #6f93c0; font-weight: 700; white-space: nowrap; }
+    .pose:hover { background: #35597f; }
+    .pose.active { background: #197f86; border-color: #7ed7dc; }
     .hold-all { background: #235960; border-color: #559aa0; font-weight: 700; white-space: nowrap; }
     .release { background: #6e2c31; border-color: #ad555a; font-weight: 700; white-space: nowrap; }
     .release:hover { background: #88373d; }
@@ -38,11 +41,7 @@
     .scales { display: flex; gap: 4px; }
     .scales button { flex: 1; min-width: 0; padding: 8px 5px; }
     .scales button.selected { background: #237c81; border-color: #8ae0e2; font-weight: 800; }
-    .limits { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
-    .limit { background: #24343d; border-radius: 8px; padding: 7px; }
-    .limit-value { font-weight: 700; margin-bottom: 5px; }
-    .limit-actions { display: flex; gap: 4px; }
-    .limit-actions button { flex: 1; font-size: .78rem; min-height: 32px; padding: 4px; }
+    .limit-range { font-weight: 700; color: #d7e4ea; }
     .goto { grid-column: 1 / -1; display: flex; align-items: end; gap: 8px; flex-wrap: wrap; }
     .goto input { width: 120px; min-height: 41px; padding: 8px; border-radius: 9px; border: 1px solid #506570; background: #10191f; color: inherit; font: inherit; }
     .hint { margin: 18px 0; font-size: .9rem; }
@@ -54,17 +53,18 @@
   <main>
     <div class="top">
       <div><h1>SO-101 Joint Control</h1><p class="subtitle muted">Hold a direction to move any joint. Release to hold its measured position.</p><p class="subtitle muted" id="folded-pose"></p></div>
-      <div class="top-actions"><button class="hold-all" id="hold-all">Hold all joints</button><button class="release" id="release" disabled title="Set and verify the coiled rest pose first">Torque release unavailable</button></div>
+      <div class="top-actions"><button class="pose" id="pose-home">Home</button><button class="pose" id="pose-fold">Fold</button><button class="hold-all" id="hold-all">Hold all joints</button><button class="release" id="release" disabled title="Set and verify the coiled rest pose first">Torque release unavailable</button></div>
     </div>
     <div id="status" class="status">Connecting to the arm…</div>
     <div id="joints" class="grid"></div>
-    <p class="hint muted">Forward increases encoder ticks. Each joint has saved limits and a 1×, 2×, 4×, or 8× hold speed. Torque remains on when a hold ends or this panel closes.</p>
+    <p class="hint muted">Forward increases encoder ticks. Saved joint limits are shown read-only; hold speed is 1×, 2×, 4×, or 8×. Home and Fold move all six joints from any in-bounds pose; press the active button again to cancel. Torque remains on when a hold ends or this panel closes.</p>
   </main>
   <script>
     const joints = document.getElementById('joints');
     const statusBox = document.getElementById('status');
     let press = null;
     let rowsBuilt = false;
+    let lastState = null;
 
     async function api(path, data) {
       const response = await fetch(path, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(data), cache: 'no-store', keepalive: path === '/api/hold/stop'});
@@ -83,7 +83,7 @@
         row.innerHTML = `<div><div class="identity"><span class="number">${motor.id}</span><span class="name">${motor.name}</span></div><div class="readings"><span class="position"></span><span class="goal"></span><span class="voltage"></span><span class="temperature"></span><span class="torque"></span><span class="fault"></span><span class="boundary"></span></div></div>
           <div><div class="group-label">Press and hold</div><div class="movement"><button class="backward" data-direction="-1">◀ Backward</button><button class="forward" data-direction="1">Forward ▶</button></div></div>
           <div><div class="group-label">Hold speed</div><div class="scales">${[1,2,4,8].map(x => `<button data-scale="${x}" aria-label="Motor ${motor.id}, ${x} times speed">${x}×</button>`).join('')}</div></div>
-          <div><div class="group-label">Saved joint limits · ticks</div><div class="limits">${['lower','upper'].map(bound => `<div class="limit"><div class="limit-value ${bound}"></div><div class="limit-actions"><button data-bound="${bound}" data-clear="false">Save ${bound}</button><button data-bound="${bound}" data-clear="true">Clear</button></div></div>`).join('')}</div></div>
+          <div><div class="group-label">Saved joint limits · ticks</div><div class="limit-range"></div></div>
           ${motor.id === 6 ? `<form class="goto"><label><span class="group-label">Motor 6 target · ticks</span><br><input type="number" step="1" min="${motor.firmware_lower}" max="${motor.firmware_upper}" value="${motor.position}" required></label><button type="submit">Go to tick</button></form>` : ''}`;
         row.querySelectorAll('[data-direction]').forEach(button => {
           button.addEventListener('pointerdown', event => { event.preventDefault(); button.setPointerCapture(event.pointerId); beginPress(motor.id, Number(button.dataset.direction), button); });
@@ -95,10 +95,6 @@
         });
         row.querySelectorAll('[data-scale]').forEach(button => button.addEventListener('click', async () => {
           try { await api('/api/scale', {motor: motor.id, scale: Number(button.dataset.scale)}); await refresh(); }
-          catch (error) { show(error.message, true); }
-        }));
-        row.querySelectorAll('[data-bound]').forEach(button => button.addEventListener('click', async () => {
-          try { await api('/api/limit', {motor: motor.id, bound: button.dataset.bound, clear: button.dataset.clear === 'true'}); await refresh(); show(`Motor ${motor.id} limits saved.`); }
           catch (error) { show(error.message, true); }
         }));
         const goForm = row.querySelector('.goto');
@@ -116,6 +112,7 @@
       rowsBuilt = true;
     }
     async function beginPress(motor, direction, button) {
+      if (lastState && lastState.pose && lastState.pose.active) return;
       endPress();
       const current = {motor, button, active: true, token: null, timer: null};
       press = current;
@@ -145,7 +142,10 @@
         const response = await fetch('/api/state', {cache: 'no-store'});
         const state = await response.json();
         if (!response.ok) throw new Error(state.error || 'Could not read arm');
+        lastState = state;
         if (!rowsBuilt) buildRows(state.motors);
+        const pose = state.pose || {};
+        const poseActive = Boolean(pose.active);
         for (const m of state.motors) {
           const row = joints.querySelector(`[data-motor="${m.id}"]`);
           row.classList.toggle('moving', state.holding === m.id);
@@ -156,31 +156,51 @@
           row.querySelector('.temperature').textContent = `${m.temperature} °C`;
           row.querySelector('.torque').textContent = m.torque ? 'Holding' : 'Free';
           row.querySelector('.fault').textContent = m.fault || '';
-          row.querySelector('.backward').disabled = !m.motion_enabled || !m.can_backward;
-          row.querySelector('.forward').disabled = !m.motion_enabled || !m.can_forward;
+          row.querySelector('.backward').disabled = !m.motion_enabled || !m.can_backward || poseActive;
+          row.querySelector('.forward').disabled = !m.motion_enabled || !m.can_forward || poseActive;
           row.querySelector('.boundary').textContent = !m.can_backward ? 'Lower end · Forward available' : !m.can_forward ? 'Upper end · Backward available' : '';
-          row.querySelector('.lower').textContent = `Lower: ${m.lower ?? 'unset'}`;
-          row.querySelector('.upper').textContent = `Upper: ${m.upper ?? 'unset'}`;
+          row.querySelector('.limit-range').textContent = `${m.lower ?? '—'}–${m.upper ?? '—'}`;
+          row.querySelectorAll('[data-scale]').forEach(button => {
+            button.disabled = poseActive;
+            button.classList.toggle('selected', Number(button.dataset.scale) === m.scale);
+          });
           const goForm = row.querySelector('.goto');
           if (goForm) {
             const input = goForm.querySelector('input');
             input.min = m.effective_lower;
             input.max = m.effective_upper;
-            goForm.querySelector('button').disabled = !m.motion_enabled || Boolean(m.fault);
+            goForm.querySelector('button').disabled = !m.motion_enabled || Boolean(m.fault) || poseActive;
           }
-          row.querySelectorAll('[data-scale]').forEach(button => button.classList.toggle('selected', Number(button.dataset.scale) === m.scale));
         }
         const faulted = state.motors.filter(m => m.fault).map(m => m.id);
         if (state.folded_ticks) document.getElementById('folded-pose').textContent =
           `Saved folded ticks 1–6: ${Object.values(state.folded_ticks).join(' · ')}`;
-        document.getElementById('hold-all').disabled = !state.hold_all_enabled;
+        const homeBtn = document.getElementById('pose-home');
+        const foldBtn = document.getElementById('pose-fold');
+        homeBtn.disabled = !state.motion_enabled || (poseActive && pose.name !== 'home');
+        foldBtn.disabled = !state.motion_enabled || (poseActive && pose.name !== 'fold');
+        homeBtn.classList.toggle('active', poseActive && pose.name === 'home');
+        foldBtn.classList.toggle('active', poseActive && pose.name === 'fold');
+        document.getElementById('hold-all').disabled = !state.hold_all_enabled || poseActive;
         if (state.error) show(state.error, true);
+        else if (poseActive) show(`Moving to ${pose.name} · ${Math.round(pose.progress * 100)}% · press ${pose.name} again to cancel`);
         else if (faulted.length) show(`Servo fault on motor${faulted.length > 1 ? 's' : ''} ${faulted.join(', ')}.`, true);
         else if (state.holding === 6 && !press) show('Motor 6 moving to target');
         else if (!press) show(state.motion_enabled ? 'All six joints ready · release a direction to hold position' : 'Torque is off · use Hold all joints to enable movement');
         else show(`Moving motor ${press.motor} · release to stop`);
       } catch (error) { show(error.message, true); endPress(); }
     }
+    async function togglePose(name) {
+      endPress();
+      const active = lastState && lastState.pose && lastState.pose.active && lastState.pose.name === name;
+      try {
+        if (active) { await api('/api/pose/stop', {}); show(`${name} move stopped.`); }
+        else { await api('/api/pose/start', {pose: name}); show(`Moving to ${name}.`); }
+        await refresh();
+      } catch (error) { show(error.message, true); }
+    }
+    document.getElementById('pose-home').addEventListener('click', () => togglePose('home'));
+    document.getElementById('pose-fold').addEventListener('click', () => togglePose('fold'));
     document.getElementById('release').addEventListener('click', async () => {
       endPress();
       try { await api('/api/release', {}); await refresh(); show('All torque released. Support the arm.'); }

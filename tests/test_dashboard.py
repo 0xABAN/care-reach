@@ -2,6 +2,9 @@
 
 import io
 import json
+import re
+import shutil
+import subprocess
 import tempfile
 import time
 import unittest
@@ -9,7 +12,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from motion_core import JOINT_NAMES
-from server import Arm, STOP_SETTLE_LEAD, handler_for
+from server import Arm, POSE_TOLERANCE, STOP_SETTLE_LEAD, handler_for
 
 
 class FakeBus:
@@ -18,6 +21,7 @@ class FakeBus:
         self.goals = self.positions.copy()
         self.torque = {name: torque for name in JOINT_NAMES}
         self.loads = {name: 0 for name in JOINT_NAMES}
+        self.status = {name: 0 for name in JOINT_NAMES}
         self.connected = False
         self.writes = []
         self.disconnects = []
@@ -39,7 +43,7 @@ class FakeBus:
             "Min_Position_Limit": {name: 0 for name in JOINT_NAMES},
             "Max_Position_Limit": {name: 4095 for name in JOINT_NAMES},
             "Operating_Mode": {name: 0 for name in JOINT_NAMES},
-            "Status": {name: 0 for name in JOINT_NAMES},
+            "Status": self.status,
             "Present_Voltage": {name: 53 for name in JOINT_NAMES},
             "Present_Temperature": {name: 24 for name in JOINT_NAMES},
             "Present_Load": self.loads,
@@ -54,12 +58,17 @@ class FakeBus:
 
     def sync_write(self, register, values, normalize=True):
         assert self.connected and not normalize
-        assert register == "Torque_Enable"
-        self.torque.update(values)
+        if register == "Torque_Enable":
+            self.torque.update(values)
+        elif register == "Goal_Position":
+            assert set(values) == set(JOINT_NAMES)
+            self.goals.update(values)
+        else:
+            raise AssertionError(f"unexpected sync_write register {register}")
         self.writes.append((register, values.copy()))
 
 
-class DashboardTests(unittest.TestCase):
+class DashboardBase(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -96,6 +105,8 @@ class DashboardTests(unittest.TestCase):
         self.addCleanup(arm.close)
         return arm
 
+
+class DashboardTests(DashboardBase):
     def test_connect_and_close_never_change_torque(self):
         bus = FakeBus((2000,) * 6)
         arm = self.arm(bus)
@@ -155,15 +166,19 @@ class DashboardTests(unittest.TestCase):
         arm.close()
         self.assertEqual(bus.disconnects, [False])
 
-    def test_saved_scale_and_limits_are_persistent(self):
+    def test_saved_scale_and_bounds_are_persistent(self):
         bus = FakeBus((2000,) * 6)
         arm = self.arm(bus)
         arm.scale(4, 8)
-        arm.limit(4, "lower", False)
         settings = json.loads(self.settings_path.read_text(encoding="utf-8"))
         self.assertEqual(settings["4"]["scale"], 8)
-        self.assertEqual(settings["4"]["lower"], 2000)
-        self.assertEqual(arm.state()["motors"][3]["effective_lower"], 2000)
+        self.assertEqual(settings["4"]["lower"], 863)
+        self.assertEqual(settings["4"]["upper"], 3110)
+        motor = arm.state()["motors"][3]
+        self.assertEqual(motor["lower"], 863)
+        self.assertEqual(motor["upper"], 3110)
+        self.assertEqual(motor["effective_lower"], 863)
+        self.assertEqual(motor["effective_upper"], 3110)
 
     def test_holding_button_repeats_motion_and_scale_changes_distance(self):
         def travel(scale):
@@ -277,6 +292,185 @@ class DashboardTests(unittest.TestCase):
         self.assertGreaterEqual(bus.goals["shoulder_pan"], bus.positions["shoulder_pan"])
 
 
+class PoseTests(DashboardBase):
+    FOLD = (2040, 893, 3064, 2888, 2416, 1470)
+
+    def run_pose(self, arm, seconds=120.0):
+        start = time.monotonic()
+        index = 0
+        for index in range(1, int(seconds / 0.06) + 1):
+            if arm.hold is None:
+                return True, index
+            arm._advance(start + index * 0.06)
+        return arm.hold is None, index
+
+    def test_home_from_fold_moves_all_joints_with_bounded_lead(self):
+        bus = TrackingBus(self.FOLD)
+        arm = self.arm(bus)
+        result = arm.pose_start("home")
+        self.assertEqual(result["pose"], "home")
+        done, steps = self.run_pose(arm)
+        self.assertTrue(done, f"pose move did not finish in {steps} steps")
+        for index, name in enumerate(JOINT_NAMES):
+            self.assertLessEqual(abs(bus.positions[name] - 2000), POSE_TOLERANCE, name)
+            self.assertEqual(bus.goals[name], 2000)
+        self.assertLessEqual(max(bus.leads), 80)
+        self.assertGreater(len(bus.leads), 20)
+        self.assertEqual(bus.disconnects, [])
+        self.assertTrue(all(value == 1 for value in bus.torque.values()))
+        self.assertFalse(arm.state()["pose"]["active"])
+
+    def test_fold_from_home_reaches_recorded_fold(self):
+        bus = TrackingBus((2000,) * 6)
+        arm = self.arm(bus)
+        arm.pose_start("fold")
+        done, steps = self.run_pose(arm)
+        self.assertTrue(done, f"pose move did not finish in {steps} steps")
+        for index, name in enumerate(JOINT_NAMES):
+            self.assertLessEqual(abs(bus.positions[name] - self.FOLD[index]), POSE_TOLERANCE, name)
+            self.assertEqual(bus.goals[name], self.FOLD[index])
+        self.assertLessEqual(max(bus.leads), 80)
+        self.assertEqual(bus.disconnects, [])
+        self.assertTrue(all(value == 1 for value in bus.torque.values()))
+
+    def test_fold_then_home_round_trip_from_fold_start(self):
+        bus = TrackingBus(self.FOLD)
+        arm = self.arm(bus)
+        arm.pose_start("home")
+        self.assertTrue(self.run_pose(arm)[0])
+        arm.pose_start("fold")
+        done, steps = self.run_pose(arm)
+        self.assertTrue(done, f"pose move did not finish in {steps} steps")
+        for index, name in enumerate(JOINT_NAMES):
+            self.assertLessEqual(abs(bus.positions[name] - self.FOLD[index]), POSE_TOLERANCE, name)
+        self.assertTrue(all(value == 1 for value in bus.torque.values()))
+
+    def test_concurrent_requests_rejected_while_pose_active(self):
+        bus = TrackingBus((2000,) * 6)
+        arm = self.arm(bus)
+        arm.pose_start("fold")
+        with self.assertRaisesRegex(ValueError, "already active"):
+            arm.pose_start("home")
+        with self.assertRaisesRegex(ValueError, "pose move"):
+            arm.start(1, 1)
+        with self.assertRaisesRegex(ValueError, "pose move"):
+            arm.go(2000)
+        with self.assertRaisesRegex(ValueError, "pose move"):
+            arm.hold_all()
+        arm.pose_stop()
+        arm.start(1, 1)
+        with self.assertRaisesRegex(ValueError, "already active"):
+            arm.pose_start("home")
+        arm.stop()
+
+    def test_cancel_holds_measured_pose_and_preserves_torque(self):
+        bus = TrackingBus((2000,) * 6)
+        arm = self.arm(bus)
+        arm.pose_start("fold")
+        start = time.monotonic()
+        for index in range(1, 6):
+            arm._advance(start + index * 0.06)
+        self.assertTrue(arm.state()["pose"]["active"])
+        arm.pose_stop()
+        self.assertIsNone(arm.hold)
+        self.assertEqual(bus.goals, bus.positions)
+        self.assertTrue(all(value == 1 for value in bus.torque.values()))
+        self.assertEqual(bus.disconnects, [])
+        self.assertFalse(arm.state()["pose"]["active"])
+
+    def test_fault_holds_measured_pose_and_preserves_torque(self):
+        class FaultBus(TrackingBus):
+            def sync_write(self, register, values, normalize=True):
+                super().sync_write(register, values, normalize)
+                if register == "Goal_Position" and len(self.writes) == 4:
+                    self.status["elbow_flex"] = 32
+
+        bus = FaultBus((2000,) * 6)
+        arm = self.arm(bus)
+        arm.pose_start("fold")
+        start = time.monotonic()
+        with self.assertRaisesRegex(RuntimeError, "fault 32"):
+            for index in range(1, 20):
+                arm._advance(start + index * 0.06)
+        arm.error = "Motor 3 servo fault 32"
+        arm._stop()
+        self.assertIsNone(arm.hold)
+        self.assertEqual(bus.goals, bus.positions)
+        self.assertTrue(all(value == 1 for value in bus.torque.values()))
+        self.assertEqual(bus.disconnects, [])
+
+    def test_stall_holds_measured_pose_and_preserves_torque(self):
+        class FrozenBus(FakeBus):
+            def sync_write(self, register, values, normalize=True):
+                super().sync_write(register, values, normalize)
+
+        bus = FrozenBus((2000,) * 6)
+        arm = self.arm(bus)
+        arm.pose_start("fold")
+        start = time.monotonic()
+        with self.assertRaisesRegex(RuntimeError, "stalled"):
+            for index in range(1, 100):
+                arm._advance(start + index * 0.06)
+        arm._stop()
+        self.assertIsNone(arm.hold)
+        self.assertEqual(bus.goals, bus.positions)
+        self.assertTrue(all(value == 1 for value in bus.torque.values()))
+        self.assertEqual(bus.disconnects, [])
+
+    def test_timeout_stops_and_holds_measured_pose(self):
+        bus = TrackingBus((2000,) * 6)
+        arm = self.arm(bus)
+        arm.pose_start("fold")
+        arm.hold["expires"] = time.monotonic() - 1
+        arm._advance(time.monotonic())
+        self.assertIsNone(arm.hold)
+        self.assertEqual(arm.error, "Movement timed out and stopped")
+        self.assertEqual(bus.goals, bus.positions)
+        self.assertTrue(all(value == 1 for value in bus.torque.values()))
+        self.assertEqual(bus.disconnects, [])
+
+    def test_close_during_pose_holds_measured_and_never_releases_torque(self):
+        bus = TrackingBus((2000,) * 6)
+        arm = self.arm(bus)
+        arm.pose_start("fold")
+        start = time.monotonic()
+        for index in range(1, 6):
+            arm._advance(start + index * 0.06)
+        arm.close()
+        self.assertEqual(bus.goals, bus.positions)
+        self.assertEqual(bus.disconnects, [False])
+        self.assertTrue(all(value == 1 for value in bus.torque.values()))
+
+    def test_pose_start_rejects_torque_off_arm(self):
+        bus = FakeBus((2000,) * 6, torque=0)
+        arm = self.arm(bus)
+        with self.assertRaisesRegex(RuntimeError, "torque is off"):
+            arm.pose_start("home")
+
+    def test_home_target_outside_envelope_is_rejected(self):
+        bus = FakeBus((2000,) * 6)
+        arm = self.arm(bus)
+        with self.assertRaises(ValueError):
+            arm.pose_start("bogus")
+
+
+class TrackingBus(FakeBus):
+    """Encoder follows commanded goals by up to 8 ticks per joint write."""
+
+    def __init__(self, positions, torque=1):
+        super().__init__(positions, torque)
+        self.leads = []
+
+    def sync_write(self, register, values, normalize=True):
+        before = self.positions.copy()
+        super().sync_write(register, values, normalize)
+        if register == "Goal_Position":
+            self.leads.append(max(abs(values[name] - before[name]) for name in JOINT_NAMES))
+            for name in JOINT_NAMES:
+                distance = self.goals[name] - before[name]
+                self.positions[name] += max(-8, min(8, distance))
+
+
 class HttpHostTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
@@ -370,6 +564,87 @@ class HttpHostTests(unittest.TestCase):
             status, payload = self.call(self.handler, {"Host": host, "Origin": origin}, client_ip="192.168.1.23")
             self.assertEqual(status, 403, (host, origin))
             self.assertEqual(payload, {"error": "Invalid origin"})
+
+    @staticmethod
+    def post(handler_class, path, body):
+        handler = handler_class.__new__(handler_class)
+        handler.path = path
+        payload = json.dumps(body).encode()
+        handler.headers = {
+            "Host": "127.0.0.1:8765",
+            "Content-Type": "application/json",
+            "Content-Length": str(len(payload)),
+        }
+        handler.rfile = io.BytesIO(payload)
+        handler.client_address = ("127.0.0.1", 43210)
+        handler.connection = type("FakeConnection", (), {"getsockname": lambda self: ("127.0.0.1", 8765)})()
+        handler.wfile = io.BytesIO()
+        handler._headers_buffer = []
+        handler.requestline = f"POST {path} HTTP/1.1"
+        handler.request_version = "HTTP/1.1"
+        handler.server_version = "Fake/1.0"
+        handler.sys_version = "Python/3"
+        handler.protocol_version = "HTTP/1.1"
+        handler.do_POST()
+        raw = handler.wfile.getvalue()
+        header_blob, _, payload = raw.partition(b"\r\n\r\n")
+        status = int(header_blob.split(b" ", 2)[1])
+        return status, json.loads(payload)
+
+    def test_pose_endpoints_run_and_state_shows_active_pose(self):
+        status, payload = self.post(self.handler, "/api/pose/start", {"pose": "home"})
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["pose"], "home")
+        self.assertIn("token", payload)
+        status, state = self.call(self.handler, {"Host": "127.0.0.1:8765"}, client_ip="127.0.0.1")
+        self.assertEqual(status, 200)
+        self.assertTrue(state["pose"]["active"])
+        self.assertEqual(state["pose"]["name"], "home")
+        self.assertEqual(state["pose"]["target"], dict(zip(JOINT_NAMES, (2000,) * 6, strict=True)))
+        status, payload = self.post(self.handler, "/api/pose/stop", {})
+        self.assertEqual(status, 200)
+        _, state = self.call(self.handler, {"Host": "127.0.0.1:8765"}, client_ip="127.0.0.1")
+        self.assertFalse(state["pose"]["active"])
+
+    def test_pose_start_validates_name(self):
+        status, payload = self.post(self.handler, "/api/pose/start", {"pose": "coiled"})
+        self.assertEqual(status, 400)
+        self.assertIn("pose must be", payload["error"])
+
+    def test_limit_endpoint_removed(self):
+        status, payload = self.post(
+            self.handler, "/api/limit", {"motor": 1, "bound": "lower", "clear": False}
+        )
+        self.assertEqual(status, 404)
+        self.assertEqual(payload, {"error": "Not found"})
+
+
+class StaticUiTests(unittest.TestCase):
+    PAGE = Path(__file__).resolve().parent.parent / "static" / "index.html"
+
+    def setUp(self):
+        self.page = self.PAGE.read_text(encoding="utf-8")
+
+    def test_home_and_fold_buttons_replace_limit_editing(self):
+        self.assertIn('id="pose-home"', self.page)
+        self.assertIn('id="pose-fold"', self.page)
+        self.assertIn(">Home</button>", self.page)
+        self.assertIn(">Fold</button>", self.page)
+        self.assertIn("/api/pose/start", self.page)
+        self.assertIn("/api/pose/stop", self.page)
+        self.assertIn("limit-range", self.page)
+        self.assertNotIn("/api/limit", self.page)
+        self.assertNotIn("data-bound", self.page)
+        self.assertNotIn("Save ${bound}", self.page)
+
+    @unittest.skipUnless(shutil.which("node"), "node is not available")
+    def test_inline_javascript_parses(self):
+        match = re.search(r"<script>(.*)</script>", self.page, re.S)
+        self.assertIsNotNone(match)
+        result = subprocess.run(
+            ["node", "--check", "-"], input=match.group(1), capture_output=True, text=True
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 
 if __name__ == "__main__":
