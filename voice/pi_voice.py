@@ -8,19 +8,42 @@ import json
 import os
 import re
 import time
-from datetime import datetime
-from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from voice_test import REPORTS, ROOT, VoiceTest, normalize, write_row
+from voice_test import ROOT, VoiceTest, normalize
 
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 ROBOT_URL = "http://127.0.0.1:8765"
 MODEL = "openai/gpt-4.1-mini"
-MOTION_WINDOW_SECONDS = 120
-COMMANDS = {"open_gripper", "close_gripper", "stop", "cancel", "pick_up_can", "none"}
+COMMANDS = {"open_gripper", "close_gripper", "home", "extend", "dance",
+            "stop", "cancel", "pick_up_can", "none"}
+POSE_COMMANDS = {"home", "extend", "dance"}
+MOTION_COMMANDS = POSE_COMMANDS | {"open_gripper", "close_gripper"}
+
+
+def grounded_request(text: str, command: str) -> bool:
+    """Require a direct request even when a classifier proposes a command."""
+    if any(mark in text for mark in ('"', '“', '”')):
+        return False
+    words = normalize(text)
+    checked = words.replace("never mind", "") if command == "cancel" else words
+    if re.search(r"\b(dont|do not|never|not|no|avoid|without|maybe|perhaps|"
+                 r"possibly|should i|could i|can i|what if|instead of)\b", checked):
+        return False
+    prefix = r"(?:please |can you |could you |would you |go ahead and |i want you to )?"
+    core = {
+        "open_gripper": r"(?:open|release) (?:the |your )?(?:gripper|claw|hand|fingers)",
+        "close_gripper": r"(?:close|shut) (?:the |your )?(?:gripper|claw|hand|fingers)",
+        "home": r"(?:retract(?: the arm)?|go (?:to )?(?:the )?home(?: position)?|"
+                r"return (?:to )?home|home the arm|move (?:the arm|it) home)",
+        "extend": r"(?:extend(?: the arm)?|(?:raise|point|move) (?:the arm|it) straight up)",
+        "dance": r"(?:dance(?: for me)?|do (?:a|the) dance|start (?:the )?dance)",
+        "stop": r"(?:stop(?: now)?|halt|freeze|emergency stop)",
+        "cancel": r"(?:cancel(?: that)?|never mind)",
+    }.get(command)
+    return bool(core and re.fullmatch(prefix + core + r"(?: please)?", words))
 
 
 def request_json(url: str, data: dict | None = None, *, headers: dict | None = None,
@@ -38,9 +61,14 @@ def classify_openrouter(text: str, key: str, model: str = MODEL) -> tuple[str, i
     prompt = (
         "Classify a short transcript for an assistive robot. Return only a JSON object "
         'with one key, "command", whose value is exactly one of: '
-        '"open_gripper", "close_gripper", "stop", "cancel", "pick_up_can", "none". '
+        '"open_gripper", "close_gripper", "home", "extend", "dance", '
+        '"stop", "cancel", "pick_up_can", "none". '
         "Choose open_gripper only for an unambiguous request to open or release the gripper. "
         "Choose close_gripper only for an unambiguous request to close the gripper. "
+        "Choose home for retract or return to the saved Home pose. "
+        "Choose extend for a request to point the arm straight up. "
+        "Choose dance only for an explicit request to dance. Never choose fold: "
+        "the wrist camera makes the old folded pose unsafe. "
         "Choose stop only for an unambiguous request to stop current motion. "
         "Choose cancel only for an unambiguous request to cancel a pending request. "
         "Choose pick_up_can for a request to pick up a can, even though this robot cannot yet do it. "
@@ -79,10 +107,8 @@ class PiVoiceTest(VoiceTest):
         self.openrouter_key = openrouter_key
         self.openrouter_model = model
         self.dashboard_file = ROOT / "pi_dashboard.html"
-        self.example_phrase = "open the gripper"
+        self.example_phrase = "open the hand"
         self.segmenter.silence_frames = 18
-        self.arm_enabled_until = 0.0
-        self.arm_enable_status = "Not enabled yet"
         self.openrouter_disabled = os.environ.get("OPENROUTER_DISABLED") == "1"
         self.command_backend = ("Local exact phrases (OpenRouter key rejected)"
                                 if self.openrouter_disabled else "OpenRouter (awaiting first command)")
@@ -91,34 +117,23 @@ class PiVoiceTest(VoiceTest):
         self.ui["stt_mode"] = stt_mode
         self.ui["action"] = ""
 
+    def parse_wake(self, text: str) -> tuple[bool, str]:
+        words = normalize(text)
+        if words == "hey arm":
+            return True, ""
+        if words.startswith("hey arm "):
+            return True, words[len("hey arm "):]
+        return False, words
+
+    def command_after_wake(self, text: str) -> str:
+        return re.sub(r"^\s*hey[\s,.!?-]+arm\b[\s,.!?-]*", "", text,
+                      count=1, flags=re.IGNORECASE).strip()
+
     def extra_state(self) -> dict:
-        seconds_left = max(0, round(self.arm_enabled_until - time.monotonic()))
-        enable_status = self.arm_enable_status
-        if self.arm_enabled_until and not seconds_left:
-            enable_status += " (expired)"
         return {
-            "arm_seconds_left": seconds_left,
-            "arm_enable_status": enable_status,
             "command_latency_ms": self.command_latency_ms,
             "command_backend": self.command_backend,
         }
-
-    def set_arm_enabled(self, enabled: bool) -> None:
-        if enabled:
-            state = self.dashboard_request(f"{ROBOT_URL}/api/state", timeout=5)
-            motors = state.get("motors", [])
-            if not any(m.get("id") == 6 and m.get("motion_enabled") and not m.get("fault")
-                       for m in motors):
-                raise ValueError("Gripper is not ready")
-            self.arm_enabled_until = time.monotonic() + MOTION_WINDOW_SECONDS
-            self.arm_enable_status = f"Enabled at {datetime.now().astimezone().strftime('%H:%M:%S')} for one move"
-            write_row(REPORTS / "arm-enables.csv", ["time", "event"], {
-                "time": datetime.now().astimezone().isoformat(timespec="seconds"), "event": "enabled"})
-            self.print(f"[arm] One gripper move enabled for {MOTION_WINDOW_SECONDS} seconds.")
-        else:
-            self.arm_enabled_until = 0.0
-            self.arm_enable_status = "Disabled manually"
-            self.print("[arm] Motion disabled. Voice decisions remain visible.")
 
     def choose_command(self, text: str) -> str | None:
         self.command_latency_ms = None
@@ -146,28 +161,8 @@ class PiVoiceTest(VoiceTest):
             self.command_backend = ("Local exact phrases (OpenRouter key rejected)"
                                     if self.openrouter_disabled else "Local exact phrases")
             command = self.local_command(text)
-        # An LLM result alone is never permission to move. Check the transcript too.
-        words = normalize(text)
-        if command in {"open_gripper", "close_gripper"} and re.search(
-            r"\b(dont|do not|never|not|no)\b", words
-        ):
-            self.print("[guard] Rejected gripper action: transcript contains negation.")
-            return None
-        if command == "open_gripper" and not (
-            re.search(r"\b(open|release)\b", words)
-            and re.search(r"\b(gripper|claw|hand|fingers)\b", words)
-        ):
-            self.print("[guard] Rejected gripper action: transcript did not ask to open it clearly.")
-            return None
-        if command == "close_gripper" and not (
-            re.search(r"\b(close|shut)\b", words)
-            and re.search(r"\b(gripper|claw|hand|fingers)\b", words)
-        ):
-            self.print("[guard] Rejected gripper action: transcript did not ask to close it clearly.")
-            return None
-        if command == "stop" and not re.search(r"\b(stop|halt|freeze)\b", words):
-            return None
-        if command == "cancel" and not re.search(r"\b(cancel|never mind)\b", words):
+        if command in MOTION_COMMANDS | {"stop", "cancel"} and not grounded_request(text, command):
+            self.print(f"[guard] Rejected {command}: transcript is not a direct request.")
             return None
         if command == "none":
             return None
@@ -177,11 +172,19 @@ class PiVoiceTest(VoiceTest):
     def local_command(text: str) -> str:
         words = normalize(text)
         if words in {"open the gripper", "open gripper", "release the gripper",
-                     "open your hand", "open the claw"}:
+                     "open your hand", "open the hand", "open the claw"}:
             return "open_gripper"
         if words in {"close the gripper", "close gripper", "shut the gripper",
-                     "close your hand", "close the claw"}:
+                     "close your hand", "close the hand", "close the claw"}:
             return "close_gripper"
+        if words in {"go home", "go to home", "go to home position", "go to the home position",
+                     "return home", "retract", "retract the arm"}:
+            return "home"
+        if words in {"extend", "extend the arm", "point the arm straight up",
+                     "raise the arm straight up"}:
+            return "extend"
+        if words in {"dance", "do a dance", "do the dance", "start the dance"}:
+            return "dance"
         if words in {"stop", "stop now", "halt", "freeze", "emergency stop"}:
             return "stop"
         if words in {"cancel", "cancel that", "never mind"}:
@@ -189,34 +192,36 @@ class PiVoiceTest(VoiceTest):
         if words in {"pick up the can", "pick up a can", "grab the can",
                      "pick up that can"}:
             return "pick_up_can"
+        for command in ("stop", "cancel", "open_gripper", "close_gripper", "home", "extend", "dance"):
+            if grounded_request(text, command):
+                return command
         return "none"
 
     def execute_command(self, command: str) -> str:
         if command == "pick_up_can":
             return "Not executed: can position and grasp plan are not available"
         if command == "cancel":
-            self.arm_enabled_until = 0.0
-            self.arm_enable_status = "Disabled by cancel"
-            return "Pending gripper action disabled"
+            self.armed_until = 0.0
+            return "Pending wake window cancelled"
         if command == "stop":
             try:
                 self.dashboard_request(f"{ROBOT_URL}/api/hold/stop", {}, timeout=5)
                 self.dashboard_request(f"{ROBOT_URL}/api/pose/stop", {}, timeout=5)
-                self.arm_enabled_until = 0.0
-                self.arm_enable_status = "Disabled by stop"
+                self.armed_until = 0.0
                 return "Stop sent to arm controller"
             except (HTTPError, URLError, TimeoutError, ValueError) as exc:
                 return f"Stop failed: {type(exc).__name__}"
-        if command not in {"open_gripper", "close_gripper"}:
+        if command not in MOTION_COMMANDS:
             return "No motor action for this command"
-        if time.monotonic() >= self.arm_enabled_until:
-            return f"Dry run: one-move enable expired; enable again for {MOTION_WINDOW_SECONDS} seconds"
-        self.arm_enabled_until = 0.0  # One physical action per enable.
-        self.arm_enable_status = "Enable used for one gripper command"
         try:
             state = self.dashboard_request(f"{ROBOT_URL}/api/state", timeout=5)
             if state.get("holding") is not None or state.get("pose", {}).get("active"):
                 return "Not executed: arm is already moving"
+            if command in POSE_COMMANDS:
+                if not state.get("pose_enabled"):
+                    return "Not executed: a joint is not ready for a group pose"
+                self.dashboard_request(f"{ROBOT_URL}/api/pose/start", {"pose": command}, timeout=5)
+                return f"Moving to {command} pose"
             gripper = next(m for m in state["motors"] if m["id"] == 6)
             if not gripper.get("motion_enabled") or gripper.get("fault"):
                 return "Not executed: gripper is not ready"

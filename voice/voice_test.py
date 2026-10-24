@@ -122,6 +122,12 @@ def split_wake(text: str) -> tuple[bool, str]:
     return False, words
 
 
+def raw_command_after_wake(text: str) -> str:
+    """Remove a spoken wake prefix without erasing quotes or negation punctuation."""
+    return re.sub(r"^\s*hey[\s,.!?]+(?:arm|um|aam|ahm|im|i\s+m)\b[\s,.!?]*",
+                  "", text, count=1, flags=re.IGNORECASE).strip()
+
+
 def write_row(path: Path, fields: list[str], row: dict) -> None:
     with path.open("a", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
@@ -234,6 +240,12 @@ class VoiceTest:
             self.ui["listening"] = enabled
         self.print("[status] Waiting for 'Hey Arm'..." if enabled else "[status] Paused. No audio sent to Cartesia.")
 
+    def parse_wake(self, text: str) -> tuple[bool, str]:
+        return split_wake(text)
+
+    def command_after_wake(self, text: str) -> str:
+        return raw_command_after_wake(text)
+
     def start_web(self, port: int) -> None:
         app = self
 
@@ -284,20 +296,6 @@ class VoiceTest:
 
             def do_POST(self) -> None:
                 if not self.trusted_request():
-                    return
-                if self.path == "/arm":
-                    try:
-                        if self.headers.get("Content-Type", "").split(";", 1)[0] != "application/json":
-                            raise ValueError("JSON required")
-                        length = min(int(self.headers.get("Content-Length", "0")), 1000)
-                        enabled = json.loads(self.rfile.read(length))["enabled"]
-                        if not isinstance(enabled, bool):
-                            raise ValueError("enabled must be boolean")
-                        app.set_arm_enabled(enabled)
-                    except (ValueError, KeyError, TypeError, NotImplementedError):
-                        self.respond(400, b"Arm control unavailable", "text/plain")
-                        return
-                    self.respond(200, b"OK", "text/plain")
                     return
                 if self.path == "/listen":
                     length = min(int(self.headers.get("Content-Length", "0")), 1000)
@@ -569,7 +567,7 @@ class VoiceTest:
             return
         if decision_started is None:
             decision_started = time.monotonic()
-        wake, remainder = split_wake(raw)
+        wake, _ = self.parse_wake(raw)
         armed = time.monotonic() < self.armed_until
         decision = "rejected"
         command = ""
@@ -583,7 +581,8 @@ class VoiceTest:
             self.print(f"[wake] {match}. Next command within {WAKE_SECONDS}s.")
         classifier_ms = 0
         if wake or armed:
-            candidate = remainder if wake else normalize(raw)
+            # Preserve the original punctuation for the Pi's grounding guard.
+            candidate = self.command_after_wake(raw) if wake else raw.strip()
             if candidate:
                 classifier_started = time.monotonic()
                 command = self.choose_command(candidate) or ""
@@ -651,9 +650,6 @@ class VoiceTest:
 
     def extra_state(self) -> dict:
         return {}
-
-    def set_arm_enabled(self, enabled: bool) -> None:
-        raise NotImplementedError
 
     def run(self, port: int) -> None:
         REPORTS.mkdir(exist_ok=True)

@@ -26,15 +26,8 @@
 <p>Command path: <strong id="commandBackend">Checking…</strong></p>
 <p>Audio streams to Cartesia while listening. After “Hey Arm,” the Pi checks exact command phrases, then uses OpenRouter when needed.</p>
 <button id="listenButton" onclick="toggleListening()">Pause listening</button>
-<p>Say <strong>“Hey Arm, open the gripper”</strong> in one phrase. If the screen says <strong>“Wake heard”</strong>, say <strong>“open the gripper”</strong> within 12 seconds.</p>
-<div class="card">
-  <div class="label">Arm action</div>
-  <p>The voice test starts in dry-run mode. Enable one small gripper move for 120 seconds, then say “Hey Arm, open the gripper” or “Hey Arm, close the gripper.” The arm action is disabled after one move or when the countdown expires. Keep fingers clear of the gripper. “Pick up the can” is reported but cannot move the arm until camera localization and grasping are built.</p>
-  <button onclick="setArm(true)">Enable one gripper move</button>
-  <button onclick="setArm(false)">Disable arm action</button>
-  <div class="value" id="arm">Dry run</div>
-  <p id="armEvent">Not enabled yet.</p>
-</div>
+<p>Try <strong>“Hey Arm, open the hand”</strong>, “close the hand,” “retract,” “extend,” or “dance.” Retract goes to Home. Extend points the arm straight up. Fold is disabled because the wrist camera blocks that position.</p>
+<p>Say “Hey Arm” with the command, or say it first and give the command within 12 seconds. Keep clear of the arm while it moves. “Pick up the can” is recognized, but it cannot run until the camera can locate the can.</p>
 <p id="connection"></p>
 <div class="card"><div class="label">Live status</div><div class="value" id="status">Connecting…</div></div>
 <div class="card"><div class="label">USB mic level</div><div class="value" id="level">—</div><p>The number should rise when you speak. Cartesia decides when a phrase ends in streaming mode.</p></div>
@@ -81,13 +74,6 @@ async function diagnostic() {
     if (!response.ok) throw new Error('Could not start audio check');
   } catch (error) { document.getElementById('connection').textContent = error.message; }
 }
-async function setArm(enabled) {
-  try {
-    const response = await fetch('/arm', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({enabled})});
-    if (!response.ok) throw new Error('Could not enable arm action; check the Pi dashboard');
-    document.getElementById('connection').textContent = '';
-  } catch (error) { document.getElementById('connection').textContent = error.message; }
-}
 async function trial(expected) {
   try {
     const response = await fetch('/trial', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({expected})});
@@ -116,8 +102,6 @@ async function refresh() {
       : `Capture ${timing.capture_ms ?? '—'} ms · speech end ${timing.endpoint_ms ?? '—'} ms · STT ${timing.stt_ms ?? '—'} ms · command ${timing.classifier_ms ?? '—'} ms · dashboard API ${timing.dashboard_api_ms ?? '—'} ms`;
     document.getElementById('action').textContent = state.action || '—';
     document.getElementById('lastCommand').textContent = state.last_command ? `${state.last_command_time}: ${state.last_command_raw} → ${state.last_command}` : '—';
-    document.getElementById('arm').textContent = state.arm_seconds_left > 0 ? `Enabled for ${state.arm_seconds_left} more seconds` : 'Dry run';
-    document.getElementById('armEvent').textContent = state.arm_enable_status || 'Not enabled yet.';
     document.getElementById('trial').textContent = state.trial || 'No trial running.';
     document.getElementById('report').textContent = state.report;
     document.getElementById('messages').textContent = state.messages.slice(-14).join('\n');
