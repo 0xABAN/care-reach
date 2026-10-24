@@ -344,6 +344,37 @@ class PoseTests(DashboardBase):
         self.assertEqual(bus.disconnects, [])
         self.assertTrue(all(value == 1 for value in bus.torque.values()))
 
+    def test_full_dance_from_fold_uses_one_bus_and_finishes_home(self):
+        bus = TrackingBus(self.FOLD)
+        arm = self.arm(bus)
+        arm.pose_start("dance")
+        self.assertEqual(arm.state()["pose"]["name"], "dance")
+        done, steps = self.run_pose(arm, seconds=160)
+        self.assertTrue(done, f"dance did not finish in {steps} steps")
+        self.assertGreater(len(bus.leads), 1100)
+        self.assertLessEqual(max(bus.leads), 80)
+        self.assertEqual(bus.disconnects, [])
+        self.assertTrue(all(value == 1 for value in bus.torque.values()))
+        for name in JOINT_NAMES:
+            self.assertEqual(bus.goals[name], 2000)
+            self.assertLessEqual(abs(bus.positions[name] - 2000), HOME_TOLERANCE)
+
+    def test_dance_cancel_holds_measured_and_blocks_jog(self):
+        bus = TrackingBus((2000,) * 6)
+        arm = self.arm(bus)
+        arm.pose_start("dance")
+        start = time.monotonic()
+        for index in range(1, 12):
+            arm._advance(start + index * .06)
+        self.assertTrue(arm.state()["pose"]["active"])
+        self.assertGreater(arm.state()["pose"]["progress"], 0)
+        with self.assertRaisesRegex(ValueError, "pose move"):
+            arm.start(1, 1)
+        arm.pose_stop()
+        self.assertIsNone(arm.hold)
+        self.assertEqual(bus.goals, bus.positions)
+        self.assertTrue(all(value == 1 for value in bus.torque.values()))
+
     def test_fold_then_home_round_trip_from_fold_start(self):
         bus = TrackingBus(self.FOLD)
         arm = self.arm(bus)
@@ -622,6 +653,16 @@ class HttpHostTests(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertIn("pose must be", payload["error"])
 
+    def test_dance_endpoint_starts_and_cancels(self):
+        status, payload = self.post(self.handler, "/api/pose/start", {"pose": "dance"})
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["pose"], "dance")
+        _, state = self.call(self.handler, {"Host": "127.0.0.1:8765"}, client_ip="127.0.0.1")
+        self.assertTrue(state["pose"]["active"])
+        self.assertEqual(state["pose"]["name"], "dance")
+        status, _ = self.post(self.handler, "/api/pose/stop", {})
+        self.assertEqual(status, 200)
+
     def test_limit_endpoint_removed(self):
         status, payload = self.post(
             self.handler, "/api/limit", {"motor": 1, "bound": "lower", "clear": False}
@@ -639,8 +680,10 @@ class StaticUiTests(unittest.TestCase):
     def test_home_and_fold_buttons_replace_limit_editing(self):
         self.assertIn('id="pose-home"', self.page)
         self.assertIn('id="pose-fold"', self.page)
+        self.assertIn('id="pose-dance"', self.page)
         self.assertIn(">Home</button>", self.page)
         self.assertIn(">Fold</button>", self.page)
+        self.assertIn(">Dance</button>", self.page)
         self.assertIn("/api/pose/start", self.page)
         self.assertIn("/api/pose/stop", self.page)
         self.assertIn("limit-range", self.page)

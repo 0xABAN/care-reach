@@ -19,7 +19,7 @@
     button:hover { background: #35505b; }
     button:focus-visible { outline: 3px solid #7ed7dc; outline-offset: 2px; }
     button:disabled { opacity: .45; cursor: default; }
-    .top-actions { display: flex; gap: 8px; }
+    .top-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
     .pose { background: #2b4a6f; border-color: #6f93c0; font-weight: 700; white-space: nowrap; }
     .pose:hover { background: #35597f; }
     .pose.active { background: #197f86; border-color: #7ed7dc; }
@@ -53,11 +53,11 @@
   <main>
     <div class="top">
       <div><h1>SO-101 Joint Control</h1><p class="subtitle muted">Hold a direction to move any joint. Release to hold its measured position.</p><p class="subtitle muted" id="folded-pose"></p></div>
-      <div class="top-actions"><button class="pose" id="pose-home">Home</button><button class="pose" id="pose-fold">Fold</button><button class="hold-all" id="hold-all">Hold all joints</button><button class="release" id="release" disabled title="Set and verify the coiled rest pose first">Torque release unavailable</button></div>
+      <div class="top-actions"><button class="pose" id="pose-home">Home</button><button class="pose" id="pose-fold">Fold</button><button class="pose" id="pose-dance">Dance</button><button class="hold-all" id="hold-all">Hold all joints</button><button class="release" id="release" disabled title="Set and verify the coiled rest pose first">Torque release unavailable</button></div>
     </div>
     <div id="status" class="status">Connecting to the arm…</div>
     <div id="joints" class="grid"></div>
-    <p class="hint muted">Forward increases encoder ticks. Saved joint limits are shown read-only; hold speed is 1×, 2×, 4×, or 8×. Home and Fold move all six joints from any in-bounds pose; press the active button again to cancel. Torque remains on when a hold ends or this panel closes.</p>
+    <p class="hint muted">Forward increases encoder ticks. Saved joint limits are shown read-only; hold speed is 1×, 2×, 4×, or 8×. Home, Fold, and Dance move all six joints; Dance homes first and returns Home. Press the active button again to cancel. Torque remains on when a hold ends or this panel closes.</p>
   </main>
   <script>
     const joints = document.getElementById('joints');
@@ -177,13 +177,16 @@
           `Saved folded ticks 1–6: ${Object.values(state.folded_ticks).join(' · ')}`;
         const homeBtn = document.getElementById('pose-home');
         const foldBtn = document.getElementById('pose-fold');
+        const danceBtn = document.getElementById('pose-dance');
         homeBtn.disabled = !state.motion_enabled || (poseActive && pose.name !== 'home');
         foldBtn.disabled = !state.motion_enabled || (poseActive && pose.name !== 'fold');
+        danceBtn.disabled = !state.motion_enabled || (poseActive && pose.name !== 'dance');
         homeBtn.classList.toggle('active', poseActive && pose.name === 'home');
         foldBtn.classList.toggle('active', poseActive && pose.name === 'fold');
+        danceBtn.classList.toggle('active', poseActive && pose.name === 'dance');
         document.getElementById('hold-all').disabled = !state.hold_all_enabled || poseActive;
         if (state.error) show(state.error, true);
-        else if (poseActive) show(`Moving to ${pose.name} · ${Math.round(pose.progress * 100)}% · press ${pose.name} again to cancel`);
+        else if (poseActive) show(`${pose.name === 'dance' ? 'Dancing' : `Moving to ${pose.name}`} · ${Math.round(pose.progress * 100)}% · press ${pose.name} again to cancel`);
         else if (faulted.length) show(`Servo fault on motor${faulted.length > 1 ? 's' : ''} ${faulted.join(', ')}.`, true);
         else if (state.holding === 6 && !press) show('Motor 6 moving to target');
         else if (!press) show(state.motion_enabled ? 'All six joints ready · release a direction to hold position' : 'Torque is off · use Hold all joints to enable movement');
@@ -195,12 +198,13 @@
       const active = lastState && lastState.pose && lastState.pose.active && lastState.pose.name === name;
       try {
         if (active) { await api('/api/pose/stop', {}); show(`${name} move stopped.`); }
-        else { await api('/api/pose/start', {pose: name}); show(`Moving to ${name}.`); }
+        else { await api('/api/pose/start', {pose: name}); show(name === 'dance' ? 'Dancing.' : `Moving to ${name}.`); }
         await refresh();
       } catch (error) { show(error.message, true); }
     }
     document.getElementById('pose-home').addEventListener('click', () => togglePose('home'));
     document.getElementById('pose-fold').addEventListener('click', () => togglePose('fold'));
+    document.getElementById('pose-dance').addEventListener('click', () => togglePose('dance'));
     document.getElementById('release').addEventListener('click', async () => {
       endPress();
       try { await api('/api/release', {}); await refresh(); show('All torque released. Support the arm.'); }

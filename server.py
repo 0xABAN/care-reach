@@ -20,6 +20,7 @@ from serial.tools import list_ports
 from lerobot.motors import Motor, MotorNormMode, SerialMotorsBus
 
 from motion_core import JOINT_NAMES, SafetyBounds, validate_pose
+from dance_demo import build_plan as build_dance_plan
 from park import HOME, folded_bounds, folded_target
 
 
@@ -48,6 +49,9 @@ POSE_TIMEOUT_SECONDS = 40
 POSE_STALL_SECONDS = 2.0
 POSE_STALL_TICKS = 3
 POSE_MEASURED_OVERSHOOT = 5
+DANCE_FPS = 20
+DANCE_SCALE = 1.0
+DANCE_STALL_SECONDS = 2.0
 
 
 def find_port():
@@ -350,9 +354,17 @@ class Arm:
         with self.lock:
             if self.hold is not None:
                 raise ValueError("A movement is already active; cancel it before starting a pose move")
-            if pose not in ("home", "fold"):
-                raise ValueError("pose must be 'home' or 'fold'")
-            target = HOME if pose == "home" else self.folded
+            if pose not in ("home", "fold", "dance"):
+                raise ValueError("pose must be 'home', 'fold', or 'dance'")
+            dance_frames = None
+            if pose == "dance":
+                _, dance_frames = build_dance_plan(self.bounds, DANCE_SCALE, DANCE_FPS)
+                for index, name in enumerate(JOINT_NAMES):
+                    low = min(frame[index] for frame in dance_frames)
+                    high = max(frame[index] for frame in dance_frames)
+                    if low < self.firmware_min[name] or high > self.firmware_max[name]:
+                        raise RuntimeError(f"Motor {index + 1} dance exceeds firmware bounds")
+            target = self.folded if pose == "fold" else HOME
             envelope = folded_bounds(self.bounds, self.folded)
             validate_pose(target, envelope)
             modes = self._read("Operating_Mode")
@@ -367,6 +379,8 @@ class Arm:
             now = time.monotonic()
             self.hold = {
                 "token": uuid.uuid4().hex, "motor": None, "mode": "pose", "pose": pose,
+                "stage": "home" if pose == "dance" else None,
+                "dance_frames": dance_frames,
                 "target": target, "bounds": envelope,
                 "start_positions": {name: snapshot[name]["position"] for name in JOINT_NAMES},
                 "measured": {name: snapshot[name]["position"] for name in JOINT_NAMES},
@@ -387,6 +401,9 @@ class Arm:
 
     def _advance_pose(self, now):
         hold = self.hold
+        if hold["pose"] == "dance" and hold["stage"] == "playback":
+            self._advance_dance(now)
+            return
         snapshot = self._snapshot()
         self._check_snapshot(snapshot, bounds=hold["bounds"], overshoot=POSE_MEASURED_OVERSHOOT)
         targets = hold["target"]
@@ -397,13 +414,26 @@ class Arm:
         remaining = sum(abs(errors[name]) for name in JOINT_NAMES)
         started = sum(abs(targets[index] - hold["start_positions"][name])
                       for index, name in enumerate(JOINT_NAMES))
-        hold["progress"] = 0.0 if not started else max(0.0, min(1.0, 1.0 - remaining / started))
-        tolerance = HOME_TOLERANCE if hold["pose"] == "home" else POSE_TOLERANCE
+        stage_progress = 1.0 if not started else max(0.0, min(1.0, 1.0 - remaining / started))
+        if hold["pose"] == "dance":
+            hold["progress"] = (.95 + .05 * stage_progress) if hold["stage"] == "finish" else .05 * stage_progress
+        else:
+            hold["progress"] = stage_progress
+        tolerance = HOME_TOLERANCE if hold["pose"] in ("home", "dance") else POSE_TOLERANCE
         if all(abs(errors[name]) <= tolerance for name in JOINT_NAMES):
             # The previous bounded goal is already near this endpoint. Keep
             # the exact pose as the holding goal so completion does not snap
             # the target backward to a still-moving encoder reading.
             self.bus.sync_write("Goal_Position", dict(zip(JOINT_NAMES, targets, strict=True)), normalize=False)
+            if hold["pose"] == "dance" and hold["stage"] == "home":
+                hold["stage"] = "playback"
+                hold["bounds"] = self.bounds
+                hold["frame_index"] = 0
+                hold["last_goals"] = dict(zip(JOINT_NAMES, HOME, strict=True))
+                hold["progress"] = .05
+                hold["next"] = now + 1 / DANCE_FPS
+                hold["expires"] = now + max(180, len(hold["dance_frames"]) * .15)
+                return
             self.hold = None
             return
         goals = {}
@@ -420,7 +450,7 @@ class Arm:
             elif abs(errors[name]) > tolerance and now - hold["progress_time"][name] >= POSE_STALL_SECONDS:
                 raise RuntimeError(f"Motor {index + 1} stalled at {position}")
             direction = 1 if errors[name] > 0 else -1
-            if hold["pose"] == "home" and tolerance < abs(errors[name]) <= HOME_TRIM_OFFSET:
+            if hold["pose"] in ("home", "dance") and tolerance < abs(errors[name]) <= HOME_TRIM_OFFSET:
                 trimming = True
                 if name in hold["trim_pending"]:
                     goal = targets[index]
@@ -440,6 +470,49 @@ class Arm:
         hold["writes"] += 1
         hold["last_update"] = now
         hold["next"] = now + (HOME_TRIM_PERIOD if trimming else POSE_STEP_SECONDS)
+
+    def _advance_dance(self, now):
+        hold = self.hold
+        snapshot = self._snapshot()
+        self._check_snapshot(snapshot, bounds=self.bounds, overshoot=POSE_MEASURED_OVERSHOOT)
+        positions = {name: snapshot[name]["position"] for name in JOINT_NAMES}
+        hold["measured"] = positions
+        for name in JOINT_NAMES:
+            load = abs(snapshot[name]["load"])
+            hold["high_load"][name] = hold["high_load"][name] + 1 if load >= MAX_LOAD else 0
+            if hold["high_load"][name] >= 3:
+                raise RuntimeError(f"{name} sustained high load {load}")
+            if abs(positions[name] - hold["progress_position"][name]) >= POSE_STALL_TICKS:
+                hold["progress_position"][name] = positions[name]
+                hold["progress_time"][name] = now
+            elif (abs(hold["last_goals"][name] - positions[name]) > 45
+                  and now - hold["progress_time"][name] >= DANCE_STALL_SECONDS):
+                raise RuntimeError(f"{name} stalled at {positions[name]}")
+        frame = hold["dance_frames"][hold["frame_index"]]
+        hold["target"] = frame
+        goals = {}
+        behind = False
+        for index, name in enumerate(JOINT_NAMES):
+            distance = frame[index] - positions[name]
+            behind |= abs(distance) > POSE_MAX_LEAD
+            goal = positions[name] + max(-POSE_MAX_LEAD, min(POSE_MAX_LEAD, distance))
+            goals[name] = int(goal)
+        validate_pose(tuple(goals[name] for name in JOINT_NAMES), self.bounds)
+        self.bus.sync_write("Goal_Position", goals, normalize=False)
+        hold["last_goals"] = goals
+        if not behind:
+            hold["frame_index"] += 1
+        hold["progress"] = .05 + .90 * hold["frame_index"] / len(hold["dance_frames"])
+        hold["next"] = now + 1 / DANCE_FPS
+        if hold["frame_index"] == len(hold["dance_frames"]):
+            hold["stage"] = "finish"
+            hold["target"] = HOME
+            hold["start_positions"] = positions
+            hold["progress_position"] = positions.copy()
+            hold["progress_time"] = {name: now for name in JOINT_NAMES}
+            hold["trim_pending"] = set()
+            hold["expires"] = now + POSE_TIMEOUT_SECONDS
+            hold["next"] = now + POSE_STEP_SECONDS
 
     def _new_hold(self, motor, mode, position, *, direction=0, target=None):
         now = time.monotonic()
@@ -700,8 +773,8 @@ def handler_for(arm, port):
                     result = {"ok": True}
                 elif path == "/api/pose/start":
                     pose = data.get("pose")
-                    if pose not in ("home", "fold"):
-                        raise ValueError("pose must be 'home' or 'fold'")
+                    if pose not in ("home", "fold", "dance"):
+                        raise ValueError("pose must be 'home', 'fold', or 'dance'")
                     result = arm.pose_start(pose)
                 elif path == "/api/pose/stop":
                     result = arm.pose_stop()
