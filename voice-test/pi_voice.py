@@ -19,7 +19,7 @@ from voice_test import REPORTS, ROOT, VoiceTest, normalize, write_row
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 ROBOT_URL = "http://127.0.0.1:8765"
 MODEL = "openai/gpt-4.1-mini"
-MOTION_WINDOW_SECONDS = 60
+MOTION_WINDOW_SECONDS = 120
 COMMANDS = {"open_gripper", "close_gripper", "stop", "cancel", "pick_up_can", "none"}
 
 
@@ -201,7 +201,7 @@ class PiVoiceTest(VoiceTest):
         if command not in {"open_gripper", "close_gripper"}:
             return "No motor action for this command"
         if time.monotonic() >= self.arm_enabled_until:
-            return "Dry run: enable arm action in this page for a 60-second test"
+            return f"Dry run: one-move enable expired; enable again for {MOTION_WINDOW_SECONDS} seconds"
         self.arm_enabled_until = 0.0  # One physical action per enable.
         self.arm_enable_status = "Enable used for one gripper command"
         try:

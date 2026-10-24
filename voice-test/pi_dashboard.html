@@ -29,7 +29,7 @@
 <p>Say <strong>“Hey Arm, open the gripper”</strong> in one phrase. If the screen says <strong>“Wake heard”</strong>, say <strong>“open the gripper”</strong> within 12 seconds.</p>
 <div class="card">
   <div class="label">Arm action</div>
-  <p>The voice test starts in dry-run mode. Enable one small gripper move for 60 seconds, then say “Hey Arm, open the gripper” or “Hey Arm, close the gripper.” The arm action is disabled after one move. Keep fingers clear of the gripper. “Pick up the can” is reported but cannot move the arm until camera localization and grasping are built.</p>
+  <p>The voice test starts in dry-run mode. Enable one small gripper move for 120 seconds, then say “Hey Arm, open the gripper” or “Hey Arm, close the gripper.” The arm action is disabled after one move or when the countdown expires. Keep fingers clear of the gripper. “Pick up the can” is reported but cannot move the arm until camera localization and grasping are built.</p>
   <button onclick="setArm(true)">Enable one gripper move</button>
   <button onclick="setArm(false)">Disable arm action</button>
   <div class="value" id="arm">Dry run</div>
