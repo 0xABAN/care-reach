@@ -17,3 +17,9 @@ From the Pi checkout, `bash deploy/pi/install-dashboard.sh` installs a systemd u
 Before opening the servo bus from another program, stop the dashboard with `systemctl --user stop care-reach-dashboard.service` on the Pi. Start it afterward with `systemctl --user start care-reach-dashboard.service`. No two programs should open the URT-2 at once. The dashboard and motion runtime preserve torque when they stop; they do not provide an automatic torque-release command.
 
 The public dataset and checkpoint described in `research/open_so101_motion/` are not deployed on this Pi. Model inference can run on the Mac mini via the Pi's Tailscale connection after cameras and a task policy are validated.
+
+## Live handoff check (2026-10-24)
+
+The Pi completed the full-scale six-joint dance in 1,182 command frames over 59.4 seconds. It ended near Home with torque enabled and no servo faults. The headless dashboard service is enabled and active. Through the Mac SSH tunnel, the panel and `/api/state` returned HTTP 200. A panel command moved motor 6 toward 1900 ticks (measured 1914), then toward 2000 (measured 1989). A held jog moved motor 5 from 2001 to 2068 ticks and back near 2022. All six motors still reported torque enabled and no faults after these checks.
+
+The Pi can push to GitHub from this checkout, and `ssh mac` works from Pi shell accounts through Tailscale. Teammates need an authorized SSH key to enter the Pi; anyone with Pi shell access can use its shared Mac login and GitHub credential.
