@@ -29,8 +29,10 @@ mkdir -p "$HOME/.config/systemd/user"
 install -m 0644 "$unit_source" "$unit_destination"
 sudo -n loginctl enable-linger robot
 systemctl --user daemon-reload
-systemctl --user enable --now "$unit_name"
+systemctl --user enable "$unit_name"
+systemctl --user restart "$unit_name"
 systemctl --user --no-pager --full status "$unit_name"
-echo 'Dashboard runs on the Pi at http://127.0.0.1:8765.'
+echo 'Dashboard runs on the Pi at http://pi.local:8765, also reachable at the'
+echo "Pi's LAN IPv4 address (http://<pi-ip>:8765) from machines on the same network."
 echo 'Stop the service before running another program that opens the URT-2:'
 echo "  systemctl --user stop $unit_name"

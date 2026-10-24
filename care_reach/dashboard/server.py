@@ -4,7 +4,9 @@ Run on the robot host from the repository root:
 
     python -m care_reach.dashboard.server --port <URT-2 serial path>
 
-The HTTP server listens only on 127.0.0.1; reach it through an SSH tunnel.
+It binds 127.0.0.1 by default. The Pi service passes --http-host 0.0.0.0 so the
+panel is reachable at http://pi.local:8765 on the local network. The panel has
+no login, so network access grants control of the arm.
 """
 
 from __future__ import annotations
@@ -18,12 +20,15 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from care_reach.dashboard.panel import PanelController
+from care_reach.dashboard.panel import POSES, PanelController
 from care_reach.hardware.bus import find_port
 from care_reach.settings import SPEED_SCALES
 
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+
+# Host header names accepted besides the address that received the connection.
+ACCEPTED_HOSTNAMES = ("localhost", "127.0.0.1", "pi", "pi.local")
 
 
 def motor_id(value):
@@ -43,14 +48,31 @@ def handler_for(arm, port):
             self.end_headers()
             self.wfile.write(body)
 
+        def _accepted_host(self, raw):
+            try:
+                parts = urlsplit("//" + raw)
+                hostname, host_port = parts.hostname, parts.port
+            except ValueError:
+                return False
+            if hostname is None or host_port != port:
+                return False
+            hostname = hostname.lower()
+            if hostname in ACCEPTED_HOSTNAMES:
+                return True
+            return hostname == self.connection.getsockname()[0].lower()
+
         def allowed(self):
-            if self.headers.get("Host") not in (f"127.0.0.1:{port}", f"localhost:{port}"):
+            """Reject DNS-rebinding and cross-site requests before any action."""
+            host = self.headers.get("Host")
+            if not host or not self._accepted_host(host):
                 self.reply(403, {"error": "Invalid host"})
                 return False
             origin = self.headers.get("Origin")
-            if origin and origin not in (f"http://127.0.0.1:{port}", f"http://localhost:{port}"):
-                self.reply(403, {"error": "Invalid origin"})
-                return False
+            if origin:
+                parts = urlsplit(origin)
+                if parts.scheme != "http" or parts.netloc != host:
+                    self.reply(403, {"error": "Invalid origin"})
+                    return False
             return True
 
         def do_GET(self):
@@ -113,12 +135,13 @@ def handler_for(arm, port):
                         raise ValueError("token must be a string")
                     arm.stop(token)
                     result = {"ok": True}
-                elif path == "/api/limit":
-                    motor = motor_id(data.get("motor"))
-                    bound = data.get("bound")
-                    if bound not in ("lower", "upper") or type(data.get("clear", False)) is not bool:
-                        raise ValueError("bound must be lower/upper and clear must be boolean")
-                    result = arm.limit(motor, bound, data.get("clear", False))
+                elif path == "/api/pose/start":
+                    pose = data.get("pose")
+                    if pose not in POSES:
+                        raise ValueError("pose must be 'home', 'fold', or 'dance'")
+                    result = arm.pose_start(pose)
+                elif path == "/api/pose/stop":
+                    result = arm.pose_stop()
                 elif path == "/api/scale":
                     motor = motor_id(data.get("motor"))
                     scale = data.get("scale")
@@ -146,12 +169,14 @@ def handler_for(arm, port):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", help="URT-2 serial port; detected automatically by default")
+    parser.add_argument("--http-host", default="127.0.0.1",
+                        help="HTTP bind address; use 0.0.0.0 on the Pi for LAN access")
     parser.add_argument("--http-port", type=int, default=8765)
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     arm = PanelController(args.port or find_port())
     try:
-        server = ThreadingHTTPServer(("127.0.0.1", args.http_port), handler_for(arm, args.http_port))
+        server = ThreadingHTTPServer((args.http_host, args.http_port), handler_for(arm, args.http_port))
     except Exception:
         arm.close()
         raise
@@ -162,7 +187,11 @@ def main():
 
     signal.signal(signal.SIGINT, shutdown)
     signal.signal(signal.SIGTERM, shutdown)
-    print(f"SO-101 control panel: http://127.0.0.1:{args.http_port}", flush=True)
+    if args.http_host == "0.0.0.0":
+        target = f"http://pi.local:{args.http_port} (or the Pi's LAN IPv4 address)"
+    else:
+        target = f"http://{args.http_host}:{args.http_port}"
+    print(f"SO-101 control panel: {target}", flush=True)
     try:
         server.serve_forever(poll_interval=0.2)
     finally:

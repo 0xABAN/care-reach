@@ -10,11 +10,11 @@ ssh robot@pi.local
 
 The `robot` account uses SSH keys only, with no password, and has passwordless `sudo`. The Pi also appears on Tailscale as `care-reach-robot-pi`. From any Pi shell, `ssh mac` reaches the Mac mini as `lancestreuber` through Tailscale SSH. Pi users share that Mac account, so give Pi shell access only to trusted teammates.
 
-The Pi has one Git working checkout at `~/worktrees/care-reach/pi-runtime`, on the dedicated **`lance/robot-pi`** branch. Commit and push this arm's future changes only on that branch. The URT-2's stable port is `/dev/serial/by-id/usb-1a86_USB_Single_Serial_5B79078563-if00`.
+The running dashboard uses the Pi checkout at `~/worktrees/care-reach/pi-runtime` on **`lance/robot-pi`**. Teammates should use [separate branches and worktrees on the Pi](docs/PI_BRANCHES.md) so they do not switch the live checkout. The URT-2's stable port is `/dev/serial/by-id/usb-1a86_USB_Single_Serial_5B79078563-if00`.
 
-The dashboard runs on the Pi and listens only on its loopback address. Install and start its headless user service with `bash deploy/pi/install-dashboard.sh` from the Pi checkout. On this Mac, run `bash deploy/mac/dashboard-tunnel.sh` to open [the dashboard](http://127.0.0.1:8765); `bash deploy/mac/dashboard-tunnel.sh stop` closes that tunnel. An authorized teammate can also make an SSH port forward to the Pi's `127.0.0.1:8765`. The dashboard provides held Forward/Backward jog, 1×/2×/4×/8× rates, go-to-tick, live servo readings, and Save lower/Save upper controls. Limits and scales persist in tracked [`config/joint_settings.json`](config/joint_settings.json).
+The dashboard runs headless on the Pi and binds `0.0.0.0:8765`. Install it with `bash deploy/pi/install-dashboard.sh` from the Pi checkout. Open [`http://pi.local:8765`](http://pi.local:8765) from the same local network. For a direct cable to a computer, run `bash deploy/pi/setup-direct-ethernet.sh` once on the Pi. Anyone who can reach the panel can control the arm; it does not ask for a login. On this Mac, `bash deploy/mac/dashboard-tunnel.sh` opens [the dashboard](http://127.0.0.1:8765) through Tailscale SSH without Ethernet; its `stop` argument closes the tunnel. The panel provides held Forward/Backward jog, 1×/2×/4×/8× rates, go-to-tick, live servo readings, and Home, Fold, and full-size Dance buttons. Saved soft bounds and speed scales persist in tracked [`config/joint_settings.json`](config/joint_settings.json); the panel shows the bounds read-only, so edit that file directly to change them.
 
-Only **one process** may own the serial bus. Before a standalone dance, park, or other CLI motion, stop the panel on the Pi with `systemctl --user stop care-reach-dashboard.service`; restart it afterward with `systemctl --user start care-reach-dashboard.service`. Closing a jog or panel does not release torque.
+Only **one process** may own the serial bus. Before a standalone dance, park, or other CLI motion, stop the panel on the Pi with `systemctl --user stop care-reach-dashboard.service`; restart it afterward with `systemctl --user start care-reach-dashboard.service`. The panel's Home, Fold, and Dance buttons use that same bus owner. Home targets `(2000,)*6` ticks and Fold targets the recorded folded pose with its narrow recorded exceptions for motors 2 and 3. Dance moves to Home first, plays the full-scale synchronized plan, and settles at Home. Each move monitors bounds, torque, faults, voltage, load, progress, and timeout, with commanded lead at or below 80 ticks per joint. A completed move keeps its exact pose as the holding goal; cancel or fault holds the measured position. Torque stays on. Press the active button again to cancel.
 
 ## Pose names
 
@@ -35,11 +35,11 @@ The `care_reach` package is organized by responsibility, from pure planning outw
 | --- | --- |
 | `care_reach/robot.py` | Facts about this arm: joint order, Home, the folded pose loader, and where its record files live. |
 | `care_reach/settings.py` | Loads and atomically saves `config/joint_settings.json`. |
-| `care_reach/motion/` | Safety bounds (`bounds.py`) and blended trajectory planning (`trajectory.py`). Never touches hardware. |
+| `care_reach/motion/` | Safety bounds (`bounds.py`), blended trajectory planning (`trajectory.py`), and calibrated FK/IK (`kinematics.py`). Never touches hardware. |
 | `care_reach/policy.py` | Converts and splices model (VLA) actions into validated tick poses. Not yet wired to a live policy. |
 | `care_reach/hardware/` | Shared bus access and live guards (`bus.py`), trajectory playback from Home (`arm_runtime.py`), and a measured-feedback pose move (`measured_pose_runner.py`). Only `bus.py` imports LeRobot. |
 | `care_reach/routines/` | Command-line motions: `home`, `park`, and `dance`. Park and dance plan offline and open the bus only with `--execute`; home always moves. Without `--port`, they find the URT-2 by its USB ID. |
-| `care_reach/dashboard/` | The jog panel: bus-owning controller (`panel.py`) and loopback HTTP server (`server.py`). |
+| `care_reach/dashboard/` | The control panel: bus-owning controller for jogs and Home/Fold/Dance moves (`panel.py`) and its HTTP server (`server.py`). |
 | `config/` | This arm's joint settings, folded pose, calibration backup, and LeRobot patch. |
 
 Run every command from the checkout root with `python -m`, so Python finds the package.
@@ -47,6 +47,8 @@ Run every command from the checkout root with `python -m`, so Python finds the p
 ## Motion
 
 The planner builds bounded, synchronized trajectories. Playback checks measured position, torque, mode, fault status, voltage, load, software limits, and firmware limits, and leaves torque enabled on exit. The measured pose runner moves from an in-bounds measured pose with bounded position lead. Motor order is 1 shoulder pan, 2 shoulder lift, 3 elbow flex, 4 wrist flex, 5 wrist roll, 6 gripper.
+
+[`care_reach/motion/kinematics.py`](care_reach/motion/kinematics.py) translates this arm's calibrated encoder ticks to the official SO-101 model's joint degrees and provides guarded local FK/IK. See [kinematics setup and live validation](docs/KINEMATICS.md). Cartesian targets are still experimental; the dashboard's Home and Fold use validated tick poses.
 
 The full-scale free-space dance ran on the Pi on 2026-10-24: 1,182 frames over 59.4 seconds, ending at `(1994, 2015, 2003, 2009, 2001, 2006)`. To preview its path without opening the bus:
 
@@ -70,7 +72,7 @@ The active calibration lives in `~/.cache/huggingface/lerobot/calibration/robots
 
 The downloaded public SO-101 dataset and ACT checkpoint are research inputs, not validated live policies here. Converted source actions exceed this arm's saved limits in 18.47% of frames, and all 128 source episodes contain an out-of-limit action. The checkpoint also requires calibrated top and wrist cameras. See [findings](research/open_so101_motion/FINDINGS.md) and [local feasibility](research/open_so101_motion/LOCAL_FEASIBILITY.md). Large model and dataset files stay outside Git.
 
-Run the offline tests from the checkout root. They use fake buses, so they need neither LeRobot nor an attached arm:
+Run the offline tests from the checkout root. They use fake buses and a stand-in kinematics model, so they need numpy but neither LeRobot nor an attached arm:
 
 ```bash
 .venv/bin/python -m unittest discover -s tests -t . -q

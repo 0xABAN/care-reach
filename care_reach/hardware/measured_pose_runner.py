@@ -46,6 +46,7 @@ class MeasuredPoseRunner:
         self.last_positions: dict[str, int] | None = None
         self.firmware_min: dict[str, int] | None = None
         self.firmware_max: dict[str, int] | None = None
+        self.success_target: tuple[int, ...] | None = None
 
     def _sample(self) -> dict[str, dict[str, int]]:
         fields = {key: read_joints(self.bus, register) for key, register in (
@@ -89,23 +90,26 @@ class MeasuredPoseRunner:
             return
         try:
             if self.position_mode:
-                try:
-                    current = read_joints(self.bus, "Present_Position")
-                except Exception:
-                    current = self.last_positions
-                if current is not None:
+                if self.success_target is not None:
+                    self._write(dict(zip(JOINT_NAMES, self.success_target, strict=True)))
+                else:
                     try:
-                        assert self.firmware_min is not None and self.firmware_max is not None
-                        held = {
-                            name: max(
-                                max(self.bounds.lower[index], self.firmware_min[name]),
-                                min(min(self.bounds.upper[index], self.firmware_max[name]), current[name]),
-                            )
-                            for index, name in enumerate(JOINT_NAMES)
-                        }
-                        self._write(held)
+                        current = read_joints(self.bus, "Present_Position")
                     except Exception:
-                        pass
+                        current = self.last_positions
+                    if current is not None:
+                        try:
+                            assert self.firmware_min is not None and self.firmware_max is not None
+                            held = {
+                                name: max(
+                                    max(self.bounds.lower[index], self.firmware_min[name]),
+                                    min(min(self.bounds.upper[index], self.firmware_max[name]), current[name]),
+                                )
+                                for index, name in enumerate(JOINT_NAMES)
+                            }
+                            self._write(held)
+                        except Exception:
+                            pass
         finally:
             self.bus.disconnect(disable_torque=False)
             self.connected = False
@@ -119,6 +123,8 @@ class MeasuredPoseRunner:
         timeout_s: float = 40.0,
         tolerance: int = 35,
         stall_s: float = 2.0,
+        trim_deadband: bool = False,
+        hold_target_on_success: bool = False,
     ) -> dict[str, Any]:
         """Move all six goals toward target; check feedback before each write.
 
@@ -139,6 +145,7 @@ class MeasuredPoseRunner:
         load_watch = LoadWatch()
         progress_position: dict[str, int] = {}
         progress_time: dict[str, float] = {}
+        trim_pending: set[str] = set()
         try:
             self.bus = self.bus_factory(self.port)
             self.bus.connect(handshake=True)
@@ -162,6 +169,8 @@ class MeasuredPoseRunner:
                 errors = {name: pose[i] - positions[name] for i, name in enumerate(JOINT_NAMES)}
                 samples.append({"time_s": now - started, "state": state})
                 if all(abs(error) <= tolerance for error in errors.values()):
+                    if hold_target_on_success:
+                        self.success_target = pose
                     return {"target": pose, "positions": positions, "writes": writes,
                             "elapsed_s": now - started, "samples": samples}
                 if now - started >= timeout_s:
@@ -175,7 +184,17 @@ class MeasuredPoseRunner:
                     elif abs(errors[name]) > tolerance and now - progress_time[name] >= stall_s:
                         raise ArmSafetyError(f"{name}: stalled at {positions[name]}")
                     direction = 1 if errors[name] > 0 else -1
-                    goal = positions[name] + direction * min(abs(errors[name]), max_lead)
+                    if trim_deadband and tolerance < abs(errors[name]) <= 45:
+                        if name in trim_pending:
+                            goal = pose[index]
+                            trim_pending.remove(name)
+                        else:
+                            goal = pose[index] + direction * 40
+                            trim_pending.add(name)
+                        goal = positions[name] + max(-max_lead, min(max_lead, goal - positions[name]))
+                    else:
+                        trim_pending.discard(name)
+                        goal = positions[name] + direction * min(abs(errors[name]), max_lead)
                     goals[name] = max(self.bounds.lower[index], min(self.bounds.upper[index], goal))
                 self._write(goals)
                 writes += 1
