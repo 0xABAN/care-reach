@@ -21,6 +21,7 @@ from urllib.request import urlopen
 from serial.tools import list_ports
 from lerobot.motors import Motor, MotorNormMode, SerialMotorsBus
 
+from measured_pose_runner import GRIP_HOLD_LEAD
 from motion_core import JOINT_NAMES, SafetyBounds, validate_pose
 from dance_demo import HOME as DANCE_CENTER, build_plan as build_dance_plan
 from home_pose import home_bounds, home_target
@@ -40,7 +41,6 @@ STOP_SETTLE_LEAD = 50  # Measured wrist coast reached 46 ticks at 8x speed.
 RECOVERY_MARGIN = 40  # Allow a small encoder drift past the saved fold, inward only.
 STEP_SECONDS = 0.04
 LEASE_SECONDS = 1.5
-GRIP_HOLD_LEAD = 30  # Small closing preload after a normal release or lost heartbeat.
 MIN_VOLTAGE_RAW = 48
 MAX_LOAD = 900
 POSITION_TOLERANCE = 15

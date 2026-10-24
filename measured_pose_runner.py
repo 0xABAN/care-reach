@@ -3,6 +3,9 @@
 The servo's own Goal_Speed and Acceleration registers shape each small
 position step. This runner never changes those registers, operating mode, or
 torque. In particular, it never releases an arm that is holding its pose.
+
+Besides whole-arm moves, it closes the gripper until the jaws touch something,
+and it moves the arm while the jaws squeeze an object.
 """
 
 from __future__ import annotations
@@ -11,7 +14,7 @@ import time
 from typing import Any, Callable
 
 from arm_runtime import _real_bus
-from motion_core import JOINT_NAMES, SafetyBounds, validate_pose
+from motion_core import JOINT_NAMES, SafetyBounds, UnsafePoseError, validate_pose
 
 
 class PoseMoveError(RuntimeError):
@@ -19,6 +22,14 @@ class PoseMoveError(RuntimeError):
 
 
 MEASURED_OVERSHOOT_TICKS = 5
+
+# After the jaws stop on an object, keep the gripper goal this far inside the
+# contact point. The squeeze holds the object without a large stall gap. The
+# dashboard keeps the same preload after a closing gripper jog.
+GRIP_HOLD_LEAD = 30
+
+GRIPPER = JOINT_NAMES[5]
+ARM_JOINTS = JOINT_NAMES[:5]
 
 
 class MeasuredPoseRunner:
@@ -100,20 +111,39 @@ class MeasuredPoseRunner:
                         current = self.last_positions
                     if current is not None:
                         try:
-                            assert self.firmware_min is not None and self.firmware_max is not None
-                            held = {
-                                name: max(
-                                    max(self.bounds.lower[index], self.firmware_min[name]),
-                                    min(min(self.bounds.upper[index], self.firmware_max[name]), current[name]),
-                                )
-                                for index, name in enumerate(JOINT_NAMES)
-                            }
-                            self._write(held)
+                            self._write(self._within_limits(current))
                         except Exception:
                             pass
         finally:
             self.bus.disconnect(disable_torque=False)
             self.connected = False
+
+    def _within_limits(self, positions: dict[str, int]) -> dict[str, int]:
+        """Pull each measured position inside both the software and firmware limits."""
+        assert self.firmware_min is not None and self.firmware_max is not None
+        return {
+            name: max(
+                max(self.bounds.lower[index], self.firmware_min[name]),
+                min(min(self.bounds.upper[index], self.firmware_max[name]), positions[name]),
+            )
+            for index, name in enumerate(JOINT_NAMES)
+        }
+
+    def _start(self, target: dict[str, int]) -> None:
+        """Connect, require position mode, and check the named target ticks against the firmware limits."""
+        if self.bus is not None:
+            raise RuntimeError("MeasuredPoseRunner is single-use")
+        self.bus = self.bus_factory(self.port)
+        self.bus.connect(handshake=True)
+        self.connected = True
+        self.firmware_min = self._read("Min_Position_Limit")
+        self.firmware_max = self._read("Max_Position_Limit")
+        modes = self._read("Operating_Mode")
+        if any(modes[name] != 0 for name in JOINT_NAMES):
+            raise PoseMoveError("all motors must be in position mode 0")
+        self.position_mode = True
+        if any(not self.firmware_min[name] <= tick <= self.firmware_max[name] for name, tick in target.items()):
+            raise PoseMoveError("target outside firmware limits")
 
     def move(
         self,
@@ -126,20 +156,25 @@ class MeasuredPoseRunner:
         stall_s: float = 2.0,
         trim_deadband: bool = False,
         hold_target_on_success: bool = False,
+        holding_object: bool = False,
     ) -> dict[str, Any]:
         """Move all six goals toward target; check feedback before each write.
 
         Each goal stays at most ``max_lead`` ticks from that joint's latest
         encoder position. The loop can move from any measured pose in bounds.
         It never silently clips the requested endpoint.
+
+        With ``holding_object``, the jaws are squeezing something. The gripper
+        goal stays at the target's gripper tick, its squeeze, and the gripper
+        is left out of the arrival, progress, and load checks: the object
+        keeps it short of its goal under load on purpose.
         """
         pose = validate_pose(target, self.bounds)
-        if self.bus is not None:
-            raise RuntimeError("MeasuredPoseRunner is single-use")
         if not 1 <= max_lead <= 80 or not 0.03 <= period_s <= 1:
             raise ValueError("invalid goal lead or sample period")
         if timeout_s <= 0 or stall_s <= 0 or not 1 <= tolerance <= 60:
             raise ValueError("invalid timeout or tolerance")
+        steered = ARM_JOINTS if holding_object else JOINT_NAMES
         started = self.clock.monotonic()
         samples: list[dict[str, Any]] = []
         writes = 0
@@ -148,18 +183,7 @@ class MeasuredPoseRunner:
         progress_time: dict[str, float] = {}
         trim_pending: set[str] = set()
         try:
-            self.bus = self.bus_factory(self.port)
-            self.bus.connect(handshake=True)
-            self.connected = True
-            self.firmware_min = self._read("Min_Position_Limit")
-            self.firmware_max = self._read("Max_Position_Limit")
-            modes = self._read("Operating_Mode")
-            if any(modes[name] != 0 for name in JOINT_NAMES):
-                raise PoseMoveError("all motors must be in position mode 0")
-            self.position_mode = True
-            if any(not self.firmware_min[name] <= pose[i] <= self.firmware_max[name]
-                   for i, name in enumerate(JOINT_NAMES)):
-                raise PoseMoveError("target outside firmware limits")
+            self._start(dict(zip(JOINT_NAMES, pose, strict=True)))
             initial = self._sample()
             self._check(initial)
             for name in JOINT_NAMES:
@@ -172,7 +196,7 @@ class MeasuredPoseRunner:
                 positions = {name: state[name]["position"] for name in JOINT_NAMES}
                 errors = {name: pose[i] - positions[name] for i, name in enumerate(JOINT_NAMES)}
                 samples.append({"time_s": now - started, "state": state})
-                if all(abs(error) <= tolerance for error in errors.values()):
+                if all(abs(errors[name]) <= tolerance for name in steered):
                     if hold_target_on_success:
                         self.success_target = pose
                     return {"target": pose, "positions": positions, "writes": writes,
@@ -181,6 +205,9 @@ class MeasuredPoseRunner:
                     raise PoseMoveError(f"pose timeout; positions {positions}")
                 goals: dict[str, int] = {}
                 for index, name in enumerate(JOINT_NAMES):
+                    if name not in steered:
+                        goals[name] = pose[index]
+                        continue
                     load = abs(state[name]["load"])
                     high_load[name] = high_load[name] + 1 if load >= 900 else 0
                     if high_load[name] >= 3:
@@ -206,5 +233,74 @@ class MeasuredPoseRunner:
                 self._write(goals)
                 writes += 1
                 self.clock.sleep(period_s)
+        finally:
+            self._close()
+
+    def close_gripper(
+        self,
+        closed_tick: int,
+        *,
+        max_lead: int = 30,
+        period_s: float = 0.1,
+        timeout_s: float = 10.0,
+        tolerance: int = 15,
+        contact_s: float = 0.5,
+    ) -> dict[str, Any]:
+        """Close the jaws until they touch something or reach ``closed_tick``.
+
+        The five arm joints hold their measured positions. The gripper goal
+        leads its encoder by at most ``max_lead`` ticks, which bounds the
+        squeeze. When the gripper stops moving short of ``closed_tick``, the
+        jaws are on an object: the goal settles GRIP_HOLD_LEAD ticks inside
+        the contact point and stays there after this runner disconnects.
+
+        Returns ``contact`` (True when the jaws stopped on something),
+        ``gripper_hold`` (the squeeze goal left on the gripper), and the
+        measured ``positions``.
+        """
+        if not self.bounds.lower[5] <= closed_tick <= self.bounds.upper[5]:
+            raise UnsafePoseError(f"gripper closed tick {closed_tick} is outside its bounds")
+        if not 1 <= max_lead <= 80 or not 0.03 <= period_s <= 1:
+            raise ValueError("invalid goal lead or sample period")
+        if timeout_s <= 0 or contact_s <= 0 or not 1 <= tolerance <= 60:
+            raise ValueError("invalid timeout, contact time, or tolerance")
+        started = self.clock.monotonic()
+        try:
+            self._start({GRIPPER: closed_tick})
+            initial = self._sample()
+            self._check(initial)
+
+            # The arm holds its measured pose, pulled inside both sets of limits.
+            goals = self._within_limits({name: initial[name]["position"] for name in JOINT_NAMES})
+
+            # Closing lowers the gripper's ticks.
+            progress_position, progress_time = initial[GRIPPER]["position"], started
+            while True:
+                state = self._sample()
+                self._check(state)
+                now = self.clock.monotonic()
+                position = state[GRIPPER]["position"]
+
+                if position - closed_tick <= tolerance:
+                    contact, hold = False, closed_tick
+                    break
+                if progress_position - position >= 3:
+                    progress_position, progress_time = position, now
+                elif now - progress_time >= contact_s:
+                    contact, hold = True, max(closed_tick, position - GRIP_HOLD_LEAD)
+                    break
+                if now - started >= timeout_s:
+                    raise PoseMoveError(f"gripper close timeout at {position}")
+
+                goals[GRIPPER] = max(closed_tick, position - max_lead)
+                self._write(goals)
+                self.clock.sleep(period_s)
+
+            goals[GRIPPER] = hold
+            self._write(goals)
+            # _close writes the same squeeze again before disconnecting, so
+            # the jaws keep holding after this runner is gone.
+            self.success_target = tuple(goals[name] for name in JOINT_NAMES)
+            return {"contact": contact, "gripper_hold": hold, "positions": self.last_positions}
         finally:
             self._close()

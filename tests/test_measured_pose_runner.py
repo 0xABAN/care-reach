@@ -2,7 +2,7 @@
 
 import unittest
 
-from measured_pose_runner import MeasuredPoseRunner, PoseMoveError
+from measured_pose_runner import GRIP_HOLD_LEAD, MeasuredPoseRunner, PoseMoveError
 from motion_core import JOINT_NAMES, SafetyBounds, UnsafePoseError
 
 
@@ -63,6 +63,28 @@ class FakeBus:
         for name in JOINT_NAMES:
             distance = goals[name] - self.positions[name]
             self.positions[name] += max(-8, min(8, distance))
+
+
+class ObjectBus(FakeBus):
+    """An object between the jaws stops the gripper at ``object_tick``; None means no object."""
+
+    def __init__(self, port, object_tick):
+        super().__init__(port)
+        self.object_tick = object_tick
+        self.history = []
+
+    def sync_write(self, register, goals, normalize=True):
+        self.history.append(self.positions["gripper"])
+        super().sync_write(register, goals, normalize)
+        if self.object_tick is not None:
+            self.positions["gripper"] = max(self.object_tick, self.positions["gripper"])
+
+    def positions_before(self, write):
+        return self.history[self.writes.index(write)]
+
+
+def runner(bus):
+    return MeasuredPoseRunner("unused", BOUNDS, bus_factory=lambda _: bus, clock=FakeClock())
 
 
 class RunnerTests(unittest.TestCase):
@@ -143,6 +165,50 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(result["positions"]["elbow_flex"], BOUNDS.upper[2] + 1)
         self.assertTrue(all(write["elbow_flex"] <= BOUNDS.upper[2] for write in bus.writes))
         self.assertEqual(bus.writes[-1]["elbow_flex"], BOUNDS.upper[2])
+        self.assertEqual(bus.disconnects, [False])
+
+    def test_closing_gripper_stops_on_an_object_and_keeps_squeezing(self):
+        bus = ObjectBus("unused", object_tick=1700)
+        bus.positions["gripper"] = 1950
+        result = runner(bus).close_gripper(BOUNDS.lower[5])
+
+        self.assertTrue(result["contact"])
+        self.assertEqual(result["gripper_hold"], 1700 - GRIP_HOLD_LEAD)
+        self.assertEqual(bus.writes[-1]["gripper"], 1700 - GRIP_HOLD_LEAD)
+        self.assertTrue(all(write["shoulder_lift"] == 2000 for write in bus.writes))
+        self.assertTrue(all(abs(write["gripper"] - bus.positions_before(write)) <= 30
+                            for write in bus.writes[:-1]))
+        self.assertEqual(bus.disconnects, [False])
+        self.assertTrue(all(bus.torque.values()))
+
+    def test_closing_gripper_on_nothing_reports_a_miss(self):
+        bus = ObjectBus("unused", object_tick=None)
+        bus.positions["gripper"] = 1600
+        result = runner(bus).close_gripper(BOUNDS.lower[5])
+
+        self.assertFalse(result["contact"])
+        self.assertEqual(result["gripper_hold"], BOUNDS.lower[5])
+        self.assertEqual(bus.disconnects, [False])
+
+    def test_closed_tick_outside_bounds_is_rejected_before_connect(self):
+        bus = ObjectBus("unused", object_tick=None)
+        with self.assertRaises(UnsafePoseError):
+            runner(bus).close_gripper(BOUNDS.lower[5] - 1)
+        self.assertFalse(bus.connected)
+
+    def test_holding_an_object_moves_the_arm_and_keeps_the_squeeze(self):
+        # The jaws stop on the object 30 ticks short of their squeeze goal,
+        # under high load: neither may count as a stall or an overload.
+        bus = ObjectBus("unused", object_tick=1700)
+        bus.positions["gripper"] = 1700
+        bus.load["gripper"] = 950
+        squeeze = 1700 - GRIP_HOLD_LEAD
+        target = (2000, 2100, 1900, 2000, 2000, squeeze)
+        result = runner(bus).move(target, tolerance=15, holding_object=True, hold_target_on_success=True)
+
+        self.assertLessEqual(abs(result["positions"]["shoulder_lift"] - 2100), 15)
+        self.assertEqual(result["positions"]["gripper"], 1700)
+        self.assertTrue(all(write["gripper"] == squeeze for write in bus.writes))
         self.assertEqual(bus.disconnects, [False])
 
     def test_larger_encoder_excursion_stops_and_holds_inward(self):
