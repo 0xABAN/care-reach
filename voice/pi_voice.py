@@ -72,19 +72,23 @@ def classify_openrouter(text: str, key: str, model: str = MODEL) -> tuple[str, i
 
 
 class PiVoiceTest(VoiceTest):
-    def __init__(self, device: str, cartesia_key: str, openrouter_key: str, model: str):
+    def __init__(self, device: str, cartesia_key: str, openrouter_key: str, model: str,
+                 stt_mode: str = "stream"):
         super().__init__(device, cartesia_key, backend="alsa")
+        self.stt_mode = stt_mode
         self.openrouter_key = openrouter_key
         self.openrouter_model = model
         self.dashboard_file = ROOT / "pi_dashboard.html"
         self.example_phrase = "open the gripper"
-        self.silence_frames_required = 30
+        self.segmenter.silence_frames = 18
         self.arm_enabled_until = 0.0
         self.arm_enable_status = "Not enabled yet"
         self.openrouter_disabled = os.environ.get("OPENROUTER_DISABLED") == "1"
         self.command_backend = ("Local exact phrases (OpenRouter key rejected)"
                                 if self.openrouter_disabled else "OpenRouter (awaiting first command)")
-        self.ui["model"] = f"Cartesia Ink-Whisper + {model}"
+        stt_model = "Ink-2 (streaming)" if stt_mode == "stream" else "Ink-Whisper (batch)"
+        self.ui["model"] = f"Cartesia {stt_model} + {model}"
+        self.ui["stt_mode"] = stt_mode
         self.ui["action"] = ""
 
     def extra_state(self) -> dict:
@@ -101,7 +105,7 @@ class PiVoiceTest(VoiceTest):
 
     def set_arm_enabled(self, enabled: bool) -> None:
         if enabled:
-            state = request_json(f"{ROBOT_URL}/api/state", timeout=5)
+            state = self.dashboard_request(f"{ROBOT_URL}/api/state", timeout=5)
             motors = state.get("motors", [])
             if not any(m.get("id") == 6 and m.get("motion_enabled") and not m.get("fault")
                        for m in motors):
@@ -196,8 +200,8 @@ class PiVoiceTest(VoiceTest):
             return "Pending gripper action disabled"
         if command == "stop":
             try:
-                request_json(f"{ROBOT_URL}/api/hold/stop", {}, timeout=5)
-                request_json(f"{ROBOT_URL}/api/pose/stop", {}, timeout=5)
+                self.dashboard_request(f"{ROBOT_URL}/api/hold/stop", {}, timeout=5)
+                self.dashboard_request(f"{ROBOT_URL}/api/pose/stop", {}, timeout=5)
                 self.arm_enabled_until = 0.0
                 self.arm_enable_status = "Disabled by stop"
                 return "Stop sent to arm controller"
@@ -210,7 +214,7 @@ class PiVoiceTest(VoiceTest):
         self.arm_enabled_until = 0.0  # One physical action per enable.
         self.arm_enable_status = "Enable used for one gripper command"
         try:
-            state = request_json(f"{ROBOT_URL}/api/state", timeout=5)
+            state = self.dashboard_request(f"{ROBOT_URL}/api/state", timeout=5)
             if state.get("holding") is not None or state.get("pose", {}).get("active"):
                 return "Not executed: arm is already moving"
             gripper = next(m for m in state["motors"] if m["id"] == 6)
@@ -226,10 +230,17 @@ class PiVoiceTest(VoiceTest):
                 direction = "Closing"
             if distance < 50:
                 return "Not executed: gripper is already near that limit"
-            request_json(f"{ROBOT_URL}/api/motor6/go", {"target": target}, timeout=5)
+            self.dashboard_request(f"{ROBOT_URL}/api/motor6/go", {"target": target}, timeout=5)
             return f"{direction} gripper to tick {target} (120 tick maximum)"
         except (HTTPError, URLError, TimeoutError, ValueError, KeyError, StopIteration) as exc:
             return f"Gripper action failed: {type(exc).__name__}"
+
+    def dashboard_request(self, url: str, data: dict | None = None, *, timeout: float = 8) -> dict:
+        started = time.monotonic()
+        try:
+            return request_json(url, data, timeout=timeout)
+        finally:
+            self.dashboard_api_ms += round((time.monotonic() - started) * 1000)
 
 
 def main() -> None:
@@ -237,12 +248,14 @@ def main() -> None:
     parser.add_argument("--device", default="hw:2,0", help="ALSA USB mic device")
     parser.add_argument("--port", type=int, default=8770)
     parser.add_argument("--model", default=MODEL)
+    parser.add_argument("--stt-mode", choices=("stream", "batch"), default="stream",
+                        help="Cartesia live turns or local batch utterance detection")
     args = parser.parse_args()
     cartesia_key = os.environ.get("CARTESIA_API_KEY", "").strip()
     openrouter_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
     if not cartesia_key or not openrouter_key:
         parser.error("CARTESIA_API_KEY and OPENROUTER_API_KEY must be set")
-    PiVoiceTest(args.device, cartesia_key, openrouter_key, args.model).run(args.port)
+    PiVoiceTest(args.device, cartesia_key, openrouter_key, args.model, args.stt_mode).run(args.port)
 
 
 if __name__ == "__main__":

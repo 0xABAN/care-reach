@@ -24,7 +24,7 @@
 <span class="badge">Pi USB mic · Cartesia transcription · OpenRouter command selection</span>
 <p>Models: <strong id="model">Loading…</strong></p>
 <p>Command path: <strong id="commandBackend">Checking…</strong></p>
-<p>Audio is sent to Cartesia when the Pi detects speech. Command text is sent to OpenRouter after “Hey Arm.”</p>
+<p>Audio streams to Cartesia while listening. After “Hey Arm,” the Pi checks exact command phrases, then uses OpenRouter when needed.</p>
 <button id="listenButton" onclick="toggleListening()">Pause listening</button>
 <p>Say <strong>“Hey Arm, open the gripper”</strong> in one phrase. If the screen says <strong>“Wake heard”</strong>, say <strong>“open the gripper”</strong> within 12 seconds.</p>
 <div class="card">
@@ -37,7 +37,7 @@
 </div>
 <p id="connection"></p>
 <div class="card"><div class="label">Live status</div><div class="value" id="status">Connecting…</div></div>
-<div class="card"><div class="label">USB mic level</div><div class="value" id="level">—</div><p>The number should rise when you speak. Trigger level is the minimum used to detect speech.</p></div>
+<div class="card"><div class="label">USB mic level</div><div class="value" id="level">—</div><p>The number should rise when you speak. Cartesia decides when a phrase ends in streaming mode.</p></div>
 <div class="grid">
   <div class="card"><div class="label">Exact transcription</div><div class="value" id="raw">—</div></div>
   <div class="card"><div class="label">Decision</div><div class="value" id="decision">—</div></div>
@@ -105,10 +105,15 @@ async function refresh() {
     document.getElementById('status').textContent = state.status;
     document.getElementById('model').textContent = state.model || 'Unknown';
     document.getElementById('commandBackend').textContent = state.command_backend || 'Unknown';
-    document.getElementById('level').textContent = `${state.mic_level}  (trigger: ${state.trigger_level})`;
+    document.getElementById('level').textContent = state.stt_mode === 'stream'
+      ? `${state.mic_level}  (Cartesia turn detection)`
+      : `${state.mic_level}  (trigger: ${state.trigger_level})`;
     document.getElementById('raw').textContent = state.raw || '—';
     document.getElementById('decision').textContent = state.command ? `${state.decision}: ${state.command}` : (state.decision || '—');
-    document.getElementById('latency').textContent = `Total ${state.total_latency_ms ?? '—'} ms · STT ${state.latency_ms ?? '—'} ms · command ${state.command_latency_ms ?? '—'} ms`;
+    const timing = state.timing || {};
+    document.getElementById('latency').textContent = timing.turn_ms !== undefined
+      ? `Model turn ${timing.turn_ms ?? '—'} ms · first text ${timing.first_partial_ms ?? '—'} ms · final confirmation ${timing.finalize_ms ?? '—'} ms · command ${timing.classifier_ms ?? '—'} ms · dashboard API ${timing.dashboard_api_ms ?? '—'} ms`
+      : `Capture ${timing.capture_ms ?? '—'} ms · speech end ${timing.endpoint_ms ?? '—'} ms · STT ${timing.stt_ms ?? '—'} ms · command ${timing.classifier_ms ?? '—'} ms · dashboard API ${timing.dashboard_api_ms ?? '—'} ms`;
     document.getElementById('action').textContent = state.action || '—';
     document.getElementById('lastCommand').textContent = state.last_command ? `${state.last_command_time}: ${state.last_command_raw} → ${state.last_command}` : '—';
     document.getElementById('arm').textContent = state.arm_seconds_left > 0 ? `Enabled for ${state.arm_seconds_left} more seconds` : 'Dry run';

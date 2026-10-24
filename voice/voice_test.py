@@ -24,9 +24,6 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from cartesia import Cartesia
-
-
 ROOT = Path(__file__).resolve().parent
 MODEL_ID = "cartesia-ink-whisper"
 MODEL_NAME = "Cartesia Ink-Whisper (cloud)"
@@ -38,6 +35,63 @@ WAKE_SECONDS = 12
 TRIAL_SECONDS = 90
 EVENT_FIELDS = ["time", "trial_id", "raw_text", "wake_detected", "decision", "command", "latency_ms"]
 TRIAL_FIELDS = ["time", "trial_id", "expected", "observed", "wake_detected", "outcome", "latency_ms"]
+
+
+class LevelSegmenter:
+    """RMS endpoint detector with a short ambient calibration and hysteresis.
+
+    Keeping the ambient estimate current while idle prevents a steady loud mic
+    floor from looking like continuous speech. During speech it stays fixed so
+    a long phrase cannot teach the detector that the speaker is background.
+    """
+
+    def __init__(self, *, silence_frames: int = 30, calibration_frames: int = 20,
+                 ambient_frames: int = 150, onset_ratio: float = 1.8,
+                 release_ratio: float = 1.35, min_level: float = 100.0,
+                 max_frames: int = 400):
+        self.silence_frames = silence_frames
+        self.calibration_frames = calibration_frames
+        self.onset_ratio = onset_ratio
+        self.release_ratio = release_ratio
+        self.min_level = min_level
+        self.max_frames = max_frames
+        self.ambient: deque[float] = deque(maxlen=ambient_frames)
+        self.active = False
+        self.hot_frames = 0
+        self.quiet_frames = 0
+        self.speech_frames = 0
+        self.last_endpoint_frames = 0
+        self.noise_floor = 20.0
+
+    @property
+    def threshold(self) -> float:
+        return max(self.min_level, self.noise_floor * self.onset_ratio)
+
+    def reset(self) -> None:
+        self.active = False
+        self.hot_frames = self.quiet_frames = self.speech_frames = 0
+
+    def feed(self, level: float) -> str | None:
+        if not self.active:
+            self.ambient.append(level)
+            self.noise_floor = statistics.median(self.ambient)
+            if len(self.ambient) < self.calibration_frames:
+                return None
+            self.hot_frames = self.hot_frames + 1 if level >= self.threshold else 0
+            if self.hot_frames >= 2:
+                self.active = True
+                self.speech_frames = self.hot_frames
+                self.quiet_frames = 0
+                return "start"
+            return None
+        self.speech_frames += 1
+        release_level = max(self.min_level, self.noise_floor * self.release_ratio)
+        self.quiet_frames = self.quiet_frames + 1 if level < release_level else 0
+        if self.quiet_frames >= self.silence_frames or self.speech_frames >= self.max_frames:
+            self.last_endpoint_frames = self.quiet_frames
+            self.reset()
+            return "end"
+        return None
 
 
 def normalize(text: str) -> str:
@@ -125,7 +179,10 @@ class Trial:
 
 class VoiceTest:
     def __init__(self, device: str, api_key: str, *, backend: str = "avfoundation"):
+        from cartesia import Cartesia
+
         self.device = device
+        self.api_key = api_key
         self.backend = backend
         self.dashboard_file = ROOT / "dashboard.html"
         self.example_phrase = "pick up the can"
@@ -140,14 +197,10 @@ class VoiceTest:
         self.trial: Trial | None = None
         self.next_trial_id = 1
         self.armed_until = 0.0
-        self.noise_floor = 20.0
+        self.segmenter = LevelSegmenter()
         self.pre_roll: deque[bytes] = deque(maxlen=40)
         self.speech: list[bytes] = []
-        self.speech_frames = 0
-        self.quiet_frames = 0
-        self.silence_frames_required = 45
         self.command_latency_ms: int | None = None
-        self.hot_frames = 0
         self.ui_lock = threading.Lock()
         self.ui = {"status": "Starting", "model": MODEL_NAME, "listening": True, "raw": "", "decision": "", "command": "", "latency_ms": None,
                    "trial": "", "mic_level": 0, "trigger_level": 0, "audio_sequence": 0,
@@ -156,6 +209,17 @@ class VoiceTest:
         self.web: ThreadingHTTPServer | None = None
         self.save_next_audio = False
         self.level_frames = 0
+        self.last_endpoint_ms = 0
+        self.last_utterance_ms = 0
+        self.pre_roll_frames = 0
+        self.dashboard_api_ms = 0
+        self.stt_mode = "batch"
+        self.streaming_stt = None
+        self.streaming_active = False
+        self.stream_close_pending = False
+        self.transcript_queue: queue.Queue[tuple[str, dict]] = queue.Queue()
+        self.diagnostic_audio: deque[bytes] = deque(maxlen=400)
+        self.ui["stt_mode"] = "batch"
 
     def print(self, message: str) -> None:
         print(message, flush=True)
@@ -277,6 +341,30 @@ class VoiceTest:
         self.print(f"[dashboard] Open http://127.0.0.1:{port}")
 
     def start_capture(self) -> None:
+        if self.stt_mode == "stream":
+            try:
+                from streaming_stt import StreamingSTT
+                self.streaming_stt = StreamingSTT(
+                    self.api_key, self.on_streaming_turn, self.on_streaming_error,
+                    sample_rate=SAMPLE_RATE, turn_end_timeout_ms=640)
+                self.streaming_stt.start()
+                self.streaming_active = True
+                with self.ui_lock:
+                    self.ui["stt_mode"] = "stream"
+                self.print("[status] Streaming microphone audio to Cartesia")
+            except Exception as error:
+                if self.streaming_stt:
+                    try:
+                        self.streaming_stt.close()
+                    except Exception:
+                        pass
+                self.print(f"[error] Streaming STT unavailable ({type(error).__name__}); using batch mode.")
+                self.streaming_active = False
+                self.stt_mode = "batch"
+                with self.ui_lock:
+                    self.ui["stt_mode"] = "batch"
+                    self.ui["model"] = self.ui["model"].replace("Ink-2 (streaming)", "Ink-Whisper (batch)")
+                self.print("[status] Using batch microphone detection.")
         command = ["ffmpeg", "-nostdin", "-loglevel", "error", "-f", self.backend]
         if self.backend == "alsa":
             command.extend(["-channels", "1", "-sample_rate", "44100"])
@@ -295,6 +383,11 @@ class VoiceTest:
             if len(frame) != FRAME_BYTES:
                 self.stop.set()
                 break
+            if self.streaming_active:
+                self.handle_streaming_frame(frame)
+                continue
+            if self.stream_close_pending:
+                continue  # Main loop closes the failed stream before batch capture.
             try:
                 self.frame_queue.put_nowait(frame)
             except queue.Full:
@@ -303,6 +396,63 @@ class VoiceTest:
                     self.frame_queue.put_nowait(frame)
                 except queue.Empty:
                     pass
+
+    def handle_streaming_frame(self, frame: bytes) -> None:
+        self.level_frames += 1
+        if self.level_frames >= 10:
+            with self.ui_lock:
+                self.ui["mic_level"] = round(self.rms(frame))
+                self.ui["trigger_level"] = 0  # Server determines streaming turn boundaries.
+            self.level_frames = 0
+        if self.listening:
+            self.diagnostic_audio.append(frame)
+        try:
+            self.streaming_stt.send(frame if self.listening else bytes(FRAME_BYTES))
+        except Exception as error:
+            self.on_streaming_error(error)
+
+    def on_streaming_turn(self, raw: str, timing: dict) -> None:
+        if self.streaming_active and self.listening:
+            self.transcript_queue.put((raw, timing))
+
+    def on_streaming_error(self, error: Exception) -> None:
+        if self.streaming_active:
+            self.streaming_active = False
+            self.stream_close_pending = True
+            self.stt_mode = "batch"
+            with self.ui_lock:
+                self.ui["stt_mode"] = "batch"
+                self.ui["model"] = self.ui["model"].replace("Ink-2 (streaming)", "Ink-Whisper (batch)")
+            while not self.transcript_queue.empty():
+                try:
+                    self.transcript_queue.get_nowait()
+                except queue.Empty:
+                    break
+            self.print(f"[error] Streaming STT failed ({type(error).__name__}); using batch mode.")
+            self.print("[status] Using batch microphone detection.")
+
+    def handle_streaming_turns(self) -> None:
+        while True:
+            try:
+                raw, timing = self.transcript_queue.get_nowait()
+            except queue.Empty:
+                return
+            if not self.listening or self.stt_mode != "stream":
+                continue
+            if self.save_next_audio:
+                path = REPORTS / "last-utterance.wav"
+                with wave.open(str(path), "wb") as wav:
+                    wav.setnchannels(1)
+                    wav.setsampwidth(2)
+                    wav.setframerate(SAMPLE_RATE)
+                    wav.writeframes(b"".join(self.diagnostic_audio))
+                self.save_next_audio = False
+                with self.ui_lock:
+                    self.ui["audio_sequence"] += 1
+                self.print("[diagnostic] Saved recent microphone audio locally for replay.")
+            self.diagnostic_audio.clear()
+            self.process_transcript(raw, int(timing.get("stt_ms", 0)), 0, 0, 0,
+                                    stream_timing=timing)
 
     def read_commands(self) -> None:
         for line in sys.stdin:
@@ -393,6 +543,8 @@ class VoiceTest:
             return
         self.command_latency_ms = None
         decision_started = time.monotonic()
+        capture_ms = round(len(pcm) / (SAMPLE_RATE * 2) * 1000)
+        utterance_ms = self.last_utterance_ms
         if self.save_next_audio:
             path = REPORTS / "last-utterance.wav"
             with wave.open(str(path), "wb") as wav:
@@ -406,6 +558,17 @@ class VoiceTest:
             self.print("[diagnostic] Saved the last utterance locally. Use Replay in the dashboard.")
         self.print("[status] Sending utterance to Cartesia...")
         raw, latency_ms = self.transcribe(pcm)
+        self.process_transcript(raw, latency_ms, capture_ms, utterance_ms, self.last_endpoint_ms,
+                                decision_started)
+
+    def process_transcript(self, raw: str, latency_ms: int, capture_ms: int,
+                           utterance_ms: int, endpoint_ms: int,
+                           decision_started: float | None = None,
+                           stream_timing: dict | None = None) -> None:
+        if not self.listening:
+            return
+        if decision_started is None:
+            decision_started = time.monotonic()
         wake, remainder = split_wake(raw)
         armed = time.monotonic() < self.armed_until
         decision = "rejected"
@@ -418,19 +581,42 @@ class VoiceTest:
             match = ("Hey Arm detected" if normalize(raw).startswith("hey arm")
                      else "Approximate Hey Arm match")
             self.print(f"[wake] {match}. Next command within {WAKE_SECONDS}s.")
+        classifier_ms = 0
         if wake or armed:
             candidate = remainder if wake else normalize(raw)
             if candidate:
+                classifier_started = time.monotonic()
                 command = self.choose_command(candidate) or ""
+                classifier_ms = round((time.monotonic() - classifier_started) * 1000)
                 decision = "accepted" if command else "rejected"
                 self.armed_until = 0.0
+        self.dashboard_api_ms = 0
         action = self.execute_command(command) if command else ""
         total_latency_ms = round((time.monotonic() - decision_started) * 1000)
         self.print(f"[heard] {raw or '(nothing)'}")
         self.print(f"[decision] {decision}" + (f": {command}" if command else "") + f" | response {total_latency_ms} ms" + (f" | action: {action}" if action else ""))
+        if stream_timing is None:
+            timing_values = {"capture_ms": capture_ms, "utterance_ms": utterance_ms,
+                             "endpoint_ms": endpoint_ms, "stt_ms": latency_ms}
+            timing_line = (f"capture={capture_ms}ms utterance≈{utterance_ms}ms "
+                           f"endpoint={endpoint_ms}ms stt={latency_ms}ms")
+        else:
+            timing_values = {"turn_ms": stream_timing.get("turn_ms"),
+                             "first_partial_ms": stream_timing.get("first_partial_ms"),
+                             "finalize_ms": stream_timing.get("finalize_ms") or None}
+            finalize_text = (f"{timing_values['finalize_ms']}ms"
+                             if timing_values["finalize_ms"] is not None else "n/a")
+            timing_line = (f"model_turn={timing_values['turn_ms']}ms "
+                           f"first_partial={timing_values['first_partial_ms']}ms "
+                           f"eager_to_final={finalize_text}")
+        timing_values.update(classifier_ms=classifier_ms, dashboard_api_ms=self.dashboard_api_ms)
+        self.print(f"[timing] {timing_line} classifier={classifier_ms}ms "
+                   f"dashboard_api={self.dashboard_api_ms}ms")
         with self.ui_lock:
             self.ui.update(raw=raw or "(nothing)", decision=decision, command=command,
-                           latency_ms=latency_ms, total_latency_ms=total_latency_ms)
+                           latency_ms=latency_ms if stream_timing is None else None,
+                           total_latency_ms=total_latency_ms,
+                           timing=timing_values)
             if command:
                 self.ui.update(last_command_raw=raw, last_command=command, action=action,
                                last_command_time=datetime.now().astimezone().isoformat(timespec="seconds"))
@@ -480,7 +666,16 @@ class VoiceTest:
         self.print("[help] Type report for counts, quit to stop.")
         try:
             while not self.stop.is_set():
+                if self.stream_close_pending:
+                    try:
+                        self.streaming_stt.close()
+                    except Exception as error:
+                        self.print(f"[error] Streaming cleanup failed ({type(error).__name__}).")
+                    finally:
+                        self.streaming_stt = None
+                        self.stream_close_pending = False
                 self.handle_console()
+                self.handle_streaming_turns()
                 if self.trial and time.monotonic() >= self.trial.deadline:
                     self.finish_trial()
                 if self.armed_until and time.monotonic() >= self.armed_until:
@@ -491,7 +686,8 @@ class VoiceTest:
                 except queue.Empty:
                     continue
                 level = self.rms(frame)
-                threshold = max(100.0, self.noise_floor * 3.0)
+                event = self.segmenter.feed(level) if self.listening else None
+                threshold = self.segmenter.threshold
                 self.level_frames += 1
                 if self.level_frames >= 10:
                     with self.ui_lock:
@@ -501,35 +697,32 @@ class VoiceTest:
                 if not self.listening:
                     self.speech = []
                     self.pre_roll.clear()
-                    self.hot_frames = 0
+                    self.segmenter.reset()
                     self.armed_until = 0.0
                     continue
-                hot = level >= threshold
                 if not self.speech:
-                    if not hot:
-                        self.noise_floor = 0.995 * self.noise_floor + 0.005 * level
-                    self.hot_frames = self.hot_frames + 1 if hot else 0
                     self.pre_roll.append(frame)
-                    if self.hot_frames >= 2:
+                    if event == "start":
                         self.speech = list(self.pre_roll)
-                        self.speech_frames = 2
-                        self.quiet_frames = 0
+                        self.pre_roll_frames = len(self.pre_roll)
                         self.print("[status] Speech detected...")
                 else:
                     self.speech.append(frame)
-                    self.speech_frames += 1
-                    self.quiet_frames = 0 if hot else self.quiet_frames + 1
-                    if self.quiet_frames >= self.silence_frames_required or self.speech_frames >= 400:
+                    if event == "end":
                         pcm = b"".join(self.speech)
+                        self.last_endpoint_ms = self.segmenter.last_endpoint_frames * FRAME_MS
+                        self.last_utterance_ms = max(0, (len(self.speech) - self.pre_roll_frames
+                                                         - self.segmenter.last_endpoint_frames) * FRAME_MS)
                         self.speech = []
                         self.pre_roll.clear()
-                        self.hot_frames = 0
-                        if self.speech_frames >= 15:
+                        if len(pcm) >= 15 * FRAME_BYTES:
                             self.process_utterance(pcm)
         except KeyboardInterrupt:
             pass
         finally:
             self.stop.set()
+            if self.streaming_stt:
+                self.streaming_stt.close()
             if self.web:
                 self.web.shutdown()
                 self.web.server_close()
