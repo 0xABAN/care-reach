@@ -20,6 +20,9 @@ from motion_core import JOINT_NAMES, SafetyBounds, validate_pose
 ARM_NAMES = JOINT_NAMES[:5]
 TICKS_PER_REVOLUTION = 4095
 
+# The pinned official model cached on the Pi; see docs/KINEMATICS.md.
+URDF_PATH = Path.home() / ".cache/care-reach/so101-model/so101_new_calib.urdf"
+
 
 class IKError(ValueError):
     """The requested Cartesian step cannot be commanded safely."""

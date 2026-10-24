@@ -24,6 +24,9 @@ JOINT_NAMES = (
     "gripper",
 )
 
+# LeRobot reads and writes this arm's active calibration here.
+CALIBRATION_PATH = Path.home() / ".cache/huggingface/lerobot/calibration/robots/so_follower/care_reach_follower.json"
+
 
 class UnsafePoseError(ValueError):
     """A requested tick pose lies outside the configured safe interval."""
@@ -74,8 +77,7 @@ class SafetyBounds:
         gripper opening. They apply in position mode, where ticks are 0..4095.
         """
         settings_path = Path(settings_path) if settings_path is not None else Path(__file__).resolve().parent / "joint_settings.json"
-        calibration_path = (Path(calibration_path) if calibration_path is not None else
-                            Path.home() / ".cache/huggingface/lerobot/calibration/robots/so_follower/care_reach_follower.json")
+        calibration_path = Path(calibration_path) if calibration_path is not None else CALIBRATION_PATH
         with settings_path.open(encoding="utf-8") as file:
             settings = json.load(file)
         with calibration_path.open(encoding="utf-8") as file:

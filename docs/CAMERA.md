@@ -31,6 +31,7 @@ endpoint is `/stream`, and `/snapshot` returns one JPEG frame. Run
 `bash deploy/mac/camera-tunnel.sh stop` to close the tunnel. Other trusted
 computers can make the same SSH forward to Pi port 8766.
 
-The image currently faces the room. Its position and orientation relative to
-the arm have not been calibrated, so it is not yet a robot wrist-coordinate
-sensor or an input to autonomous motion.
+Its position and orientation relative to the arm have not been calibrated.
+[Picking up objects](PICK.md) avoids needing that: with the camera on the
+wrist mount, it looks and nudges until the object sits where the jaws are, and
+a one-time setup records which picture direction is which gripper axis.
