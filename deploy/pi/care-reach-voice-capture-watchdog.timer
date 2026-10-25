@@ -1,0 +1,10 @@
+[Unit]
+Description=Recover stopped Care Reach voice USB capture
+
+[Timer]
+OnBootSec=45s
+OnUnitActiveSec=20s
+Unit=care-reach-voice-capture-watchdog.service
+
+[Install]
+WantedBy=timers.target
