@@ -725,7 +725,7 @@ class TaughtMoveTests(DashboardBase):
         arm = self.taught_arm(bus)
         step = self.offset(40, 60, -60, 30, 0, 0)
         self.teach(arm, bus, "press_button", [step])
-        self.assertEqual(arm.state()["taught_moves"], {"press_button": 1, "lift_this": 0})
+        self.assertEqual(arm.state()["taught_moves"], {"press_button": 1, "lift_this": 0, "bring_to_mouth": 0})
         saved = json.loads(self.taught_path.read_text())
         self.assertEqual(saved["press_button"], [list(step)])
         self.assertEqual(bus.writes, [])  # Teaching never moves the arm.
@@ -890,7 +890,7 @@ class TaughtMoveTests(DashboardBase):
     def test_speed_setting_persists_and_old_files_default_to_1x(self):
         bus = FakeBus(self.HOME)
         arm = self.taught_arm(bus)
-        self.assertEqual(arm.state()["taught_speeds"], {"press_button": 1.0, "lift_this": 1.0})
+        self.assertEqual(arm.state()["taught_speeds"], {"press_button": 1.0, "lift_this": 1.0, "bring_to_mouth": 1.0})
         self.teach(arm, bus, "lift_this", [self.offset(0, 200, -200, 0, 0, 0)])
         arm.teach_speed("lift_this", 2)
         self.assertEqual(json.loads(self.taught_path.read_text())["speeds"]["lift_this"], 2.0)
@@ -902,7 +902,7 @@ class TaughtMoveTests(DashboardBase):
                 arm.teach_speed("lift_this", bad)
         old = self.taught_path.parent / "old.json"
         old.write_text(json.dumps({"lift_this": [], "press_button": []}))
-        self.assertEqual(load_taught_speeds(old), {"press_button": 1.0, "lift_this": 1.0})
+        self.assertEqual(load_taught_speeds(old), {"press_button": 1.0, "lift_this": 1.0, "bring_to_mouth": 1.0})
 
     def test_2x_speed_finishes_faster_within_command_limits(self):
         from arm_control.arm import MAX_COMMAND_SPEED, taught_limits
