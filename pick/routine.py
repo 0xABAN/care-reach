@@ -1,61 +1,75 @@
-"""The whole pick: center over the object, lower the open jaws around it, grip, and lift."""
+"""The whole pick: find the object, reach it, grip, and lift.
+
+1. **Look.** Both cameras find the object from wherever the arm is.
+2. **Look again, up close.** The jaws move near the object at the angle
+   they will grasp it, placed so the wrist camera looks straight at it, and
+   both cameras locate it again. The arm's kinematic model is off by a couple
+   of centimeters across its reach, but the error barely changes over a short
+   move, so the object located from here is where the jaws will go.
+3. **Pre-grasp.** The open jaws line up a few centimeters short of it.
+4. **Approach.** Straight along the jaws, in short steps. If the jaws push on
+   something, the measured mover stalls and stops the pick.
+5. **Grip.** The jaws close until they stop on something. If they close on
+   nothing, they reopen and back out.
+6. **Lift.** The jaws rise, still squeezing, and the pick checks they still
+   hold something.
+"""
 
 from __future__ import annotations
 
 from enum import Enum
-from typing import TYPE_CHECKING
+import logging
+from typing import Callable, Protocol
 
-from pick.center import Camera, CenterResult, Detector, center_over
-from pick.config import PickConfig
-
-if TYPE_CHECKING:
-    from pick.arm import PickArm
+from pick.grasp import GraspPlan
+from pick.locate import Target
 
 
-# How high above the table the jaw tips stop to close: around the lower part
-# of a short object, with room for error in the kinematic model's height.
-DEFAULT_GRASP_HEIGHT_M = 0.02
+LIFT_M = 0.03
+
+log = logging.getLogger(__name__)
 
 
 class PickResult(Enum):
     PICKED_UP = "picked up"
     MISSED = "missed"
     DROPPED = "dropped"
-    NOT_FOUND = "not found"
-    COULD_NOT_CENTER = "could not center"
 
 
-def pick_up(
-    name: str,
-    arm: PickArm,
-    camera: Camera,
-    detector: Detector,
-    config: PickConfig,
-    grasp_height_m: float = DEFAULT_GRASP_HEIGHT_M,
-) -> PickResult:
-    """Pick up ``name`` from the table and hold it at the survey height.
+class Planner(Protocol):
+    def plan(self, target: Target, start: tuple[int, ...]) -> GraspPlan: ...
+    def look_pose(self, target: Target, grasp: GraspPlan, start: tuple[int, ...]) -> tuple[int, ...]: ...
 
-    The jaws go straight down from the survey pose until their tips are
-    ``grasp_height_m`` above the table, close until they touch something,
-    and come back up. A miss reopens them before rising.
-    """
-    descent_m = config.jaw_height_m - grasp_height_m
-    if descent_m <= 0:
-        raise ValueError("The jaws already sit at or below the grasp height in the survey pose")
 
-    arm.move_to(config.survey_pose)
-    centered = center_over(name, arm, camera, detector, config)
-    if centered is not CenterResult.CENTERED:
-        # Both results share their wording with PickResult.
-        return PickResult(centered.value)
+class Arm(Protocol):
+    ticks: tuple[int, ...]
 
-    arm.open_gripper()
-    arm.move_vertically(-descent_m)
-    gripped = arm.close_gripper()
-    if not gripped:
+    @property
+    def holding(self) -> bool: ...
+    def move_to(self, pose: tuple[int, ...]) -> None: ...
+    def open_gripper(self) -> None: ...
+    def close_gripper(self) -> bool: ...
+    def lift(self, dz_m: float) -> None: ...
+
+
+def pick_up(arm: Arm, see: Callable[[tuple[int, ...]], Target], planner: Planner) -> PickResult:
+    """Pick up what ``see`` locates from the arm's measured ticks, and hold it LIFT_M higher."""
+    target = see(arm.ticks)
+    log.info("first look: %s", target)
+    grasp = planner.plan(target, arm.ticks)
+    arm.move_to(planner.look_pose(target, grasp, arm.ticks))
+
+    target = see(arm.ticks)
+    log.info("close look: %s", target)
+    grasp = planner.plan(target, arm.ticks)
+    log.info("approaching at %d degrees from straight down", grasp.tilt_deg)
+    for pose in grasp.approach:
+        arm.move_to(pose)
+
+    if not arm.close_gripper():
         arm.open_gripper()
-    arm.move_vertically(descent_m)
-
-    if not gripped:
+        arm.move_to(grasp.pregrasp)
         return PickResult.MISSED
+
+    arm.lift(LIFT_M)
     return PickResult.PICKED_UP if arm.holding else PickResult.DROPPED

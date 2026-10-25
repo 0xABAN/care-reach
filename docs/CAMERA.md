@@ -38,10 +38,8 @@ endpoint is `/stream`, and `/snapshot` returns one JPEG frame. Run
 `bash deploy/mac/camera-tunnel.sh stop` to close the tunnel. Other trusted
 computers can make the same SSH forward to Pi port 8766.
 
-Its position and orientation relative to the arm have not been calibrated.
-[Picking up objects](PICK.md) avoids needing that: with the camera on the
-wrist mount, it looks and nudges until the object sits where the jaws are, and
-a one-time setup records which picture direction is which gripper axis.
+`calibrate_cameras.py` measures its lens and its mount on the gripper; see
+[picking up objects](PICK.md).
 
 ## Second USB camera
 
@@ -58,4 +56,6 @@ systemctl --user status care-reach-camera-2.service
 
 The regular dashboard relays the second feed at `/camera2/stream` and
 `/camera2/snapshot` alongside the first camera and ultrasonic range display.
-The new camera has not been calibrated into the robot's coordinate frame.
+It sits low on the base's turning part, so it turns with the shoulder pan, and
+its picture is turned on its side. `calibrate_cameras.py shoulder` measures its
+lens and its mount on the shoulder.
