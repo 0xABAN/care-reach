@@ -29,6 +29,10 @@
     .transcription { background: #263841; border-color: #6f93c0; font-weight: 700; white-space: nowrap; }
     .transcription[aria-checked="true"] { background: #197f86; border-color: #7ed7dc; }
     .voice-status { margin: -8px 0 16px; font-size: .9rem; }
+    .teach { margin: 0 0 16px; padding: 12px 14px; border: 1px solid #33454f; border-radius: 12px; background: #1c2a32; }
+    .teach summary { cursor: pointer; font-weight: 700; }
+    .teach-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-top: 10px; }
+    .teach-row .name { min-width: 130px; }
     .grid { display: grid; gap: 12px; }
     .joint { background: #1c2a32; border: 1px solid #33454f; border-radius: 14px; padding: 17px; display: grid; grid-template-columns: minmax(155px,1.2fr) minmax(215px,1.5fr) minmax(180px,1fr) minmax(245px,1.5fr); gap: 16px; align-items: center; }
     .joint.moving { border-color: #7ed7dc; box-shadow: inset 0 0 0 1px #7ed7dc; }
@@ -80,10 +84,16 @@
     <section id="controls-panel" role="tabpanel" aria-labelledby="tab-controls">
     <div class="top">
       <div><h1>SO-101 Joint Control</h1><p class="subtitle muted">Hold a direction to move any joint. Release to hold its measured position.</p><p class="subtitle muted" id="extended-pose"></p></div>
-      <div class="top-actions"><button class="transcription" id="transcription-toggle" role="switch" aria-checked="false" disabled>Transcription: checking…</button><button class="pose" id="pose-home">Home / Retract</button><button class="pose" id="pose-extend">Extend</button><button class="pose" id="pose-dance">Dance</button><button class="hold-all" id="hold-all">Hold all joints</button><button class="release" id="release" disabled title="Torque release is unavailable">Torque release unavailable</button></div>
+      <div class="top-actions"><button class="transcription" id="transcription-toggle" role="switch" aria-checked="false" disabled>Transcription: checking…</button><button class="pose" id="pose-home">Home / Retract</button><button class="pose" id="pose-extend">Extend</button><button class="pose" id="pose-dance">Dance</button><button class="pose" id="pose-press_button">Press button</button><button class="pose" id="pose-lift_this">Lift this</button><button class="hold-all" id="hold-all">Hold all joints</button><button class="release" id="release" disabled title="Torque release is unavailable">Torque release unavailable</button></div>
     </div>
     <p id="voice-status" class="voice-status muted" role="status">Checking voice service…</p>
     <div id="status" class="status">Connecting to the arm…</div>
+    <details class="teach" id="teach">
+      <summary>Teach moves</summary>
+      <p class="muted">Jog the arm to each position in order, then press Save. Playback moves smoothly through the saved steps. For Lift this, save an open-gripper step above the object, one lowered around it, one with the gripper closed, then one lifted. The gripper may stop on the object; that counts as a grip.</p>
+      <div class="teach-row" data-move="press_button"><span class="name">Press button</span><span class="muted steps">0 steps</span><button class="save">Save current position</button><button class="clear">Clear</button></div>
+      <div class="teach-row" data-move="lift_this"><span class="name">Lift this</span><span class="muted steps">0 steps</span><button class="save">Save current position</button><button class="clear">Clear</button></div>
+    </details>
     <details class="history"><summary>Recent power and servo events</summary><ul id="fault-history"><li>Loading…</li></ul></details>
     <div id="joints" class="grid"></div>
     <p class="hint muted">Forward increases encoder ticks. Saved joint limits are shown read-only; hold speed is 1×, 2×, 4×, or 8×. Closing the gripper keeps a bounded inward hold when released. Home is the retracted pose; Extend is the camera-safe upright pose. Dance homes first and returns Home. Press an active pose button again to cancel. Torque remains on when a hold ends or this panel closes.</p>
@@ -431,6 +441,16 @@
         homeBtn.classList.toggle('active', poseActive && pose.name === 'home');
         extendBtn.classList.toggle('active', poseActive && pose.name === 'extend');
         danceBtn.classList.toggle('active', poseActive && pose.name === 'dance');
+        for (const move of ['press_button', 'lift_this']) {
+          const steps = (state.taught_moves || {})[move] || 0;
+          const button = document.getElementById(`pose-${move}`);
+          button.disabled = !state.pose_enabled || !steps || (poseActive && pose.name !== move);
+          button.classList.toggle('active', poseActive && pose.name === move);
+          const row = document.querySelector(`.teach-row[data-move="${move}"]`);
+          row.querySelector('.steps').textContent = `${steps} step${steps === 1 ? '' : 's'}`;
+          row.querySelector('.save').disabled = poseActive || state.holding !== null || !state.pose_enabled;
+          row.querySelector('.clear').disabled = !steps || (poseActive && pose.name === move);
+        }
         document.getElementById('hold-all').disabled = !state.hold_all_enabled || poseActive;
         if (state.error) show(state.error, true);
         else if (poseActive) show(`${pose.name === 'dance' ? 'Dancing' : `Moving to ${pose.name}`} · ${Math.round(pose.progress * 100)}% · press ${pose.name} again to cancel`);
@@ -452,6 +472,20 @@
     document.getElementById('pose-home').addEventListener('click', () => togglePose('home'));
     document.getElementById('pose-extend').addEventListener('click', () => togglePose('extend'));
     document.getElementById('pose-dance').addEventListener('click', () => togglePose('dance'));
+    for (const move of ['press_button', 'lift_this']) {
+      document.getElementById(`pose-${move}`).addEventListener('click', () => togglePose(move));
+      const row = document.querySelector(`.teach-row[data-move="${move}"]`);
+      row.querySelector('.save').addEventListener('click', async () => {
+        endPress();
+        try { const r = await api('/api/teach/add', {move}); show(`Saved step ${r.steps} of ${move}.`); await refresh(); }
+        catch (error) { show(error.message, true); }
+      });
+      row.querySelector('.clear').addEventListener('click', async () => {
+        if (!confirm(`Clear every saved step of ${move}?`)) return;
+        try { await api('/api/teach/clear', {move}); show(`${move} cleared.`); await refresh(); }
+        catch (error) { show(error.message, true); }
+      });
+    }
     document.getElementById('release').addEventListener('click', async () => {
       endPress();
       try { await api('/api/release', {}); await refresh(); show('All torque released. Support the arm.'); }

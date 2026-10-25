@@ -657,6 +657,126 @@ class TrackingBus(FakeBus):
                 self.positions[name] += max(-8, min(8, distance))
 
 
+class BlockedGripBus(TrackingBus):
+    """The gripper stops on an object at ``floor`` ticks."""
+
+    def __init__(self, positions, floor):
+        super().__init__(positions)
+        self.floor = floor
+
+    def sync_write(self, register, values, normalize=True):
+        super().sync_write(register, values, normalize)
+        self.positions["gripper"] = max(self.positions["gripper"], self.floor)
+
+
+class TaughtMoveTests(DashboardBase):
+    HOME = home_target()
+
+    def taught_arm(self, bus):
+        thread_patch = patch("server.threading.Thread")
+        thread_patch.start()
+        self.addCleanup(thread_patch.stop)
+        self.taught_path = self.settings_path.parent / "taught_moves.json"
+        arm = Arm("fake", bus_factory=lambda _: bus, settings_path=self.settings_path,
+                  calibration_path=self.calibration_path, pose_path=self.pose_path,
+                  telemetry_path=self.settings_path.parent / "telemetry.jsonl",
+                  taught_path=self.taught_path)
+        self.addCleanup(arm.close)
+        return arm
+
+    def offset(self, *deltas):
+        return tuple(tick + delta for tick, delta in zip(self.HOME, deltas, strict=True))
+
+    def teach(self, arm, bus, move, steps):
+        for step in steps:
+            bus.positions.update(zip(JOINT_NAMES, step, strict=True))
+            arm.teach_add(move)
+        bus.positions.update(zip(JOINT_NAMES, self.HOME, strict=True))
+        bus.goals = bus.positions.copy()
+
+    def run_pose(self, arm, seconds=60.0):
+        start = time.monotonic()
+        for index in range(1, int(seconds / 0.05) + 1):
+            if arm.hold is None:
+                return True
+            arm._advance(start + index * 0.05)
+        return arm.hold is None
+
+    def test_teach_saves_measured_steps_and_reloads(self):
+        bus = FakeBus(self.HOME)
+        arm = self.taught_arm(bus)
+        step = self.offset(40, 60, -60, 30, 0, 0)
+        self.teach(arm, bus, "press_button", [step])
+        self.assertEqual(arm.state()["taught_moves"], {"press_button": 1, "lift_this": 0})
+        saved = json.loads(self.taught_path.read_text())
+        self.assertEqual(saved["press_button"], [list(step)])
+        self.assertEqual(bus.writes, [])  # Teaching never moves the arm.
+        arm.teach_clear("press_button")
+        self.assertEqual(arm.state()["taught_moves"]["press_button"], 0)
+
+    def test_untaught_or_unknown_move_is_refused(self):
+        arm = self.taught_arm(FakeBus(self.HOME))
+        with self.assertRaisesRegex(ValueError, "teach it first"):
+            arm.pose_start("lift_this")
+        with self.assertRaisesRegex(ValueError, "move must be"):
+            arm.teach_add("wave")
+        self.assertIsNone(arm.hold)
+
+    def test_press_button_plays_steps_and_returns(self):
+        bus = TrackingBus(self.HOME)
+        arm = self.taught_arm(bus)
+        above = self.offset(120, 150, -150, 60, 0, 0)
+        press = self.offset(120, 190, -150, 100, 0, 0)
+        self.teach(arm, bus, "press_button", [above, press, above, self.HOME])
+        arm.pose_start("press_button")
+        self.assertEqual(arm.state()["pose"]["name"], "press_button")
+        deepest = 0
+        for _ in range(4000):
+            if arm.hold is None:
+                break
+            arm._advance(time.monotonic() + _ * 0.05)
+            deepest = max(deepest, bus.positions["shoulder_lift"])
+        self.assertIsNone(arm.hold)
+        self.assertGreaterEqual(deepest, press[1] - POSE_TOLERANCE)
+        self.assertLessEqual(max(bus.leads), 55)
+        for index, name in enumerate(JOINT_NAMES):
+            self.assertEqual(bus.goals[name], self.HOME[index])
+        self.assertTrue(all(value == 1 for value in bus.torque.values()))
+
+    def test_lift_this_grip_stops_on_object_and_keeps_small_squeeze(self):
+        floor = self.HOME[5] - 60
+        bus = BlockedGripBus(self.HOME, floor)
+        arm = self.taught_arm(bus)
+        open_ = self.offset(0, 120, -120, 40, 0, 200)
+        closed = self.offset(0, 120, -120, 40, 0, -300)
+        lifted = self.offset(0, 40, -40, 0, 0, -300)
+        # Teach with a free gripper, then replay with the object in the jaws.
+        free = TrackingBus(self.HOME)
+        teacher = self.taught_arm(free)
+        self.teach(teacher, free, "lift_this", [open_, closed, lifted])
+        arm.taught = teacher.taught
+        arm.pose_start("lift_this")
+        self.assertTrue(self.run_pose(arm), "lift move did not finish")
+        self.assertIsNone(arm.error)
+        self.assertEqual(bus.positions["gripper"], floor)
+        self.assertEqual(bus.goals["gripper"], floor - GRIP_HOLD_LEAD)
+        self.assertLessEqual(abs(bus.positions["shoulder_lift"] - lifted[1]), POSE_TOLERANCE)
+
+    def test_stop_cancels_taught_move_and_holds_measured(self):
+        bus = TrackingBus(self.HOME)
+        arm = self.taught_arm(bus)
+        self.teach(arm, bus, "press_button", [self.offset(150, 150, -150, 60, 0, 0)])
+        arm.pose_start("press_button")
+        start = time.monotonic()
+        for index in range(1, 15):
+            arm._advance(start + index * 0.05)
+        self.assertTrue(arm.state()["pose"]["active"])
+        arm.pose_stop()
+        self.assertIsNone(arm.hold)
+        self.assertEqual(bus.goals, bus.positions)
+        self.assertTrue(all(value == 1 for value in bus.torque.values()))
+
+
 class HttpHostTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()

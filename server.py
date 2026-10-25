@@ -62,6 +62,31 @@ EXTEND_FPS = 20
 EXTEND_MAX_LEAD = 55
 EXTEND_VMAX = (180, 90, 200, 90, 100, 100)
 EXTEND_AMAX = (300, 180, 260, 180, 200, 200)
+# Taught moves replay saved waypoints, a little slower than Extend.
+TAUGHT_MOVES = ("press_button", "lift_this")
+TAUGHT_PATH = ROOT / "taught_moves.json"
+TAUGHT_MAX_STEPS = 12
+TAUGHT_VMAX = (120, 90, 120, 90, 100, 120)
+TAUGHT_AMAX = (240, 180, 240, 180, 200, 240)
+POSE_NAMES = ("home", "extend", "dance") + TAUGHT_MOVES
+
+
+def load_taught(path: Path) -> dict[str, list[tuple[int, ...]]]:
+    """Saved waypoints for each taught move; missing or empty moves have none."""
+    moves = {name: [] for name in TAUGHT_MOVES}
+    if not path.is_file():
+        return moves
+    data = json.loads(path.read_text(encoding="utf-8"))
+    for name in TAUGHT_MOVES:
+        steps = data.get(name, [])
+        if not isinstance(steps, list) or len(steps) > TAUGHT_MAX_STEPS:
+            raise ValueError(f"{path}: {name} must be a list of at most {TAUGHT_MAX_STEPS} steps")
+        for step in steps:
+            if (not isinstance(step, list) or len(step) != 6
+                    or any(type(tick) is not int for tick in step)):
+                raise ValueError(f"{path}: each {name} step must be six integer ticks")
+        moves[name] = [tuple(step) for step in steps]
+    return moves
 
 
 def find_port():
@@ -97,7 +122,7 @@ class Arm:
 
     def __init__(self, port, *, bus_factory=None, settings_path: Path = SETTINGS,
                  calibration_path: Path | None = None, pose_path: Path | None = None,
-                 telemetry_path: Path = DEFAULT_PATH):
+                 telemetry_path: Path = DEFAULT_PATH, taught_path: Path = TAUGHT_PATH):
         self.lock = threading.RLock()
         self.settings_path = Path(settings_path)
         self.calibration_path = calibration_path
@@ -106,6 +131,8 @@ class Arm:
         self.folded = folded_target(pose_path) if pose_path is not None else folded_target()
         self.home = home_target()
         self.extended = extended_target()
+        self.taught_path = Path(taught_path)
+        self.taught = load_taught(self.taught_path)
         self.bounds = SafetyBounds.from_files(self.settings_path, self.calibration_path)
         self.park_bounds = folded_bounds(home_bounds(self.bounds, self.home), self.folded)
         self.hold = None
@@ -398,6 +425,7 @@ class Arm:
                 "pose_enabled": all(m["motion_enabled"] for m in motors),
                 "hold_all_enabled": not all(m["torque"] for m in motors) and not any(m["fault"] for m in motors),
                 "extended_ticks": dict(zip(JOINT_NAMES, self.extended, strict=True)),
+                "taught_moves": {name: len(steps) for name, steps in self.taught.items()},
                 "pose": {
                     "active": pose is not None,
                     "name": pose["pose"] if pose else None,
@@ -467,8 +495,11 @@ class Arm:
         with self.lock:
             if self.hold is not None:
                 raise ValueError("A movement is already active; cancel it before starting a pose move")
-            if pose not in ("home", "extend", "dance"):
-                raise ValueError("pose must be 'home', 'extend', or 'dance'; folded pose is unavailable with the wrist camera")
+            if pose not in POSE_NAMES:
+                raise ValueError(f"pose must be one of {', '.join(POSE_NAMES)}; folded pose is unavailable with the wrist camera")
+            taught = pose in TAUGHT_MOVES
+            if taught and not self.taught[pose]:
+                raise ValueError(f"{pose} has no saved positions yet; teach it first")
             dance_frames = None
             if pose == "dance":
                 _, dance_frames = build_dance_plan(self.bounds, DANCE_SCALE, DANCE_FPS)
@@ -477,9 +508,11 @@ class Arm:
                     high = max(frame[index] for frame in dance_frames)
                     if low < self.firmware_min[name] or high > self.firmware_max[name]:
                         raise RuntimeError(f"Motor {index + 1} dance exceeds firmware bounds")
-            target = self.extended if pose == "extend" else self.home
+            target = (self.taught[pose][-1] if taught else
+                      self.extended if pose == "extend" else self.home)
             envelope = self._fold_envelope(self.bounds)
-            validate_pose(target, envelope)
+            for step in (self.taught[pose] if taught else (target,)):
+                validate_pose(step, envelope)
             modes = self._read("Operating_Mode")
             if any(modes[name] != 0 for name in JOINT_NAMES):
                 raise RuntimeError("All motors must be in position mode 0; no modes were changed")
@@ -496,14 +529,20 @@ class Arm:
             coordinated = pose == "extend" or (
                 pose in ("home", "dance") and self._on_upright_corridor(start_ticks)
             )
-            trajectory = (quintic_segment(start_ticks, target, EXTEND_VMAX, EXTEND_AMAX, EXTEND_FPS)
-                          if coordinated else None)
+            if taught:
+                trajectory = []
+                for begin, end in zip((start_ticks, *self.taught[pose]), self.taught[pose]):
+                    trajectory += quintic_segment(begin, end, TAUGHT_VMAX, TAUGHT_AMAX, EXTEND_FPS)
+            elif coordinated:
+                trajectory = quintic_segment(start_ticks, target, EXTEND_VMAX, EXTEND_AMAX, EXTEND_FPS)
+            else:
+                trajectory = None
             if trajectory is not None:
                 for frame in trajectory:
                     validate_pose(frame, envelope)
                     if any(not self.firmware_min[name] <= frame[index] <= self.firmware_max[name]
                            for index, name in enumerate(JOINT_NAMES)):
-                        raise RuntimeError("Upright trajectory exceeds a firmware limit")
+                        raise RuntimeError(f"{pose} trajectory exceeds a firmware limit")
             self.hold = {
                 "token": uuid.uuid4().hex, "motor": None, "mode": "pose", "pose": pose,
                 "stage": "home" if pose == "dance" else None,
@@ -531,6 +570,43 @@ class Arm:
             span = self.extended[index] - self.home[index]
             fractions.append((ticks[index] - self.home[index]) / span)
         return all(-0.08 <= fraction <= 1.08 for fraction in fractions) and abs(fractions[0] - fractions[1]) <= 0.15
+
+    def teach_add(self, move):
+        """Save the arm's measured position as the next step of a taught move."""
+        with self.lock:
+            if move not in TAUGHT_MOVES:
+                raise ValueError(f"move must be one of {', '.join(TAUGHT_MOVES)}")
+            if self.hold is not None:
+                raise ValueError("Wait for the arm to stop before saving a position")
+            if len(self.taught[move]) >= TAUGHT_MAX_STEPS:
+                raise ValueError(f"{move} already has {TAUGHT_MAX_STEPS} steps; clear it to start over")
+            envelope = self._fold_envelope(self.bounds)
+            snapshot = self._snapshot()
+            self._check_snapshot(snapshot, bounds=envelope)
+            step = tuple(int(snapshot[name]["position"]) for name in JOINT_NAMES)
+            validate_pose(step, envelope)
+            self.taught[move].append(step)
+            self._save_taught()
+            self.telemetry.write("taught_step_saved", move=move, step=list(step),
+                                 steps=len(self.taught[move]))
+            return {"move": move, "steps": len(self.taught[move]), "saved": list(step)}
+
+    def teach_clear(self, move):
+        with self.lock:
+            if move not in TAUGHT_MOVES:
+                raise ValueError(f"move must be one of {', '.join(TAUGHT_MOVES)}")
+            if self.hold is not None and self.hold.get("pose") == move:
+                raise ValueError("Stop this move before clearing it")
+            self.taught[move] = []
+            self._save_taught()
+            self.telemetry.write("taught_move_cleared", move=move)
+            return {"move": move, "steps": 0}
+
+    def _save_taught(self):
+        data = {name: [list(step) for step in steps] for name, steps in self.taught.items()}
+        temporary = self.taught_path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        temporary.replace(self.taught_path)
 
     def pose_stop(self):
         with self.lock:
@@ -640,12 +716,18 @@ class Arm:
         frame = frames[frame_index]
         goals = {}
         behind = False
+        taught = hold["pose"] in TAUGHT_MOVES
         for index, name in enumerate(JOINT_NAMES):
             position = positions[name]
             load = abs(snapshot[name]["load"])
             hold["high_load"][name] = hold["high_load"][name] + 1 if load >= MAX_LOAD else 0
             if hold["high_load"][name] >= 3:
                 raise RuntimeError(f"Motor {index + 1} sustained high load {load}")
+            if taught and name == "gripper" and frame[index] < position - POSE_TOLERANCE:
+                # Closing jaws may stop on the object. Keep a small squeeze
+                # instead of treating the contact as a stall.
+                goals[name] = position - GRIP_HOLD_LEAD
+                continue
             if abs(position - hold["progress_position"][name]) >= POSE_STALL_TICKS:
                 hold["progress_position"][name] = position
                 hold["progress_time"][name] = now
@@ -661,11 +743,14 @@ class Arm:
                 raise RuntimeError(f"{name} trajectory goal exceeds firmware limits")
         if frame_index == len(frames) - 1 and all(
             abs(hold["target"][index] - positions[name]) <= POSE_TOLERANCE
+            or (taught and name == "gripper" and hold["target"][index] < positions[name])
             for index, name in enumerate(JOINT_NAMES)
         ):
             # Keep the exact validated pose as the holding goal. Never drop torque.
-            self.bus.sync_write("Goal_Position", dict(zip(JOINT_NAMES, hold["target"], strict=True)),
-                                normalize=False)
+            final = dict(zip(JOINT_NAMES, hold["target"], strict=True))
+            if taught:
+                final["gripper"] = max(final["gripper"], positions["gripper"] - GRIP_HOLD_LEAD)
+            self.bus.sync_write("Goal_Position", final, normalize=False)
             if hold["pose"] == "dance" and hold["stage"] == "home":
                 hold["trajectory"] = None
                 hold["stage"] = "entry"
@@ -1127,9 +1212,13 @@ def handler_for(arm, port):
                     result = {"ok": True}
                 elif path == "/api/pose/start":
                     pose = data.get("pose")
-                    if pose not in ("home", "extend", "dance"):
-                        raise ValueError("pose must be 'home', 'extend', or 'dance'; folded pose is unavailable with the wrist camera")
+                    if pose not in POSE_NAMES:
+                        raise ValueError(f"pose must be one of {', '.join(POSE_NAMES)}; folded pose is unavailable with the wrist camera")
                     result = arm.pose_start(pose)
+                elif path == "/api/teach/add":
+                    result = arm.teach_add(data.get("move"))
+                elif path == "/api/teach/clear":
+                    result = arm.teach_clear(data.get("move"))
                 elif path == "/api/pose/stop":
                     result = arm.pose_stop()
                 elif path == "/api/scale":

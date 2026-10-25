@@ -18,9 +18,10 @@ from voice_test import ROOT, VoiceTest, normalize
 
 ROBOT_URL = "http://127.0.0.1:8765"
 MODEL = "typesafe/jev-1.14"
+TAUGHT_COMMANDS = {"lift_this", "press_button"}
 COMMANDS = {"open_gripper", "close_gripper", "home", "extend", "dance",
-            "stop", "cancel", "pick_up_can", "none"}
-POSE_COMMANDS = {"home", "extend", "dance"}
+            "stop", "cancel", "pick_up_can", "none"} | TAUGHT_COMMANDS
+POSE_COMMANDS = {"home", "extend", "dance"} | TAUGHT_COMMANDS
 MOTION_COMMANDS = POSE_COMMANDS | {"open_gripper", "close_gripper"}
 WAKE_PATTERN = re.compile(r"\bhey[\s,.!?-]+arm\b", re.IGNORECASE)
 
@@ -34,6 +35,9 @@ COMMAND_PATTERNS = {
              r"return (?:to )?home|home the arm|move (?:the arm|it) home)"),
     "extend": r"(?:extend(?: the arm)?|(?:raise|point|move) (?:the arm|it) straight up)",
     "dance": r"(?:dance(?: for me)?|do (?:a|the) dance|start (?:the )?dance)",
+    "lift_this": (r"(?:(?:lift|pick up|grab) (?:the )?(?:this|that|it|object|thing)(?: up)?|"
+                  r"pick (?:this|that|it) up)"),
+    "press_button": r"(?:press|push|hit|click) (?:the |that |a )?button",
     "stop": r"(?:stop(?: now)?|halt|freeze|emergency stop)",
     "cancel": r"(?:cancel(?: that)?|never mind)",
 }
@@ -43,6 +47,8 @@ MODEL_CUES = {
     "home": r"\b(?:retract|attract|home|pull (?:the )?arm back|bring (?:the )?arm back|draw (?:the )?arm back)\b",
     "extend": r"\b(?:extend|upright|straight up|raise (?:the )?arm|lift (?:the )?arm|point (?:the )?arm up)\b",
     "dance": r"\b(?:dance|jig|wiggle)\b",
+    "lift_this": r"\b(?:lift|pick up|grab)\b.{0,20}\b(?:this|that|it|object|thing)\b",
+    "press_button": r"\b(?:press|push|hit|click)\b.{0,15}\bbutton\b",
     "stop": r"\b(?:stop|halt|freeze)\b",
     "cancel": r"\b(?:cancel|never mind|forget that)\b",
 }
@@ -255,7 +261,11 @@ class PiVoiceTest(VoiceTest):
             if command in POSE_COMMANDS:
                 if not state.get("pose_enabled"):
                     return "Not executed: a joint is not ready for a group pose"
+                if command in TAUGHT_COMMANDS and not state.get("taught_moves", {}).get(command):
+                    return f"Not executed: {command} has not been taught on the dashboard yet"
                 self.dashboard_request(f"{ROBOT_URL}/api/pose/start", {"pose": command}, timeout=5)
+                if command in TAUGHT_COMMANDS:
+                    return f"Playing taught move {command.replace('_', ' ')}"
                 return f"Moving to {command} pose"
             gripper = next(m for m in state["motors"] if m["id"] == 6)
             if not gripper.get("motion_enabled") or gripper.get("fault"):
