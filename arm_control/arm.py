@@ -137,26 +137,21 @@ def taught_limits(speed: float) -> tuple[tuple[float, ...], tuple[float, ...]]:
 
 # While carrying, lift one heavy joint at a time: elbow, then shoulder, then
 # the rest. Moving both together can sag the supply below MIN_VOLTAGE_RAW.
-CARRY_ORDER = ((2,), (1,), (0, 3, 4))
+# Every taught segment moves one motor at a time: elbow, shoulder, wrist, base,
+# wrist roll, then gripper. With a weak shared supply, each motor then gets the
+# whole supply; moving several at once sagged it below MIN_VOLTAGE_RAW.
+TAUGHT_ORDER = ((2,), (1,), (3,), (0,), (4,), (5,))
+CARRY_ORDER = TAUGHT_ORDER
 
 
 def taught_segments(start, steps, carrying_move=False):
-    """Waypoint pairs to replay; loaded segments are split joint by joint.
+    """Waypoint pairs to replay, split so only one motor moves at a time.
 
-    ``carrying_move`` means the object is already gripped when the move starts,
-    so every segment that keeps the gripper still is a loaded segment.
+    ``carrying_move`` is kept for callers; every segment is split either way.
     """
-    grips = [step[5] for step in steps]
-    closes = any(later < earlier - POSE_TOLERANCE for earlier, later in zip(grips, grips[1:]))
-    closed = min(grips)
     segments = []
     for begin, end in zip((tuple(start), *steps), steps):
-        steady = abs(end[5] - begin[5]) <= POSE_TOLERANCE
-        carrying = steady and (carrying_move or (closes and begin[5] <= closed + POSE_TOLERANCE))
-        if not carrying:
-            segments.append((tuple(begin), tuple(end)))
-            continue
-        segments += staged_segments(begin, end, CARRY_ORDER)
+        segments += staged_segments(begin, end, TAUGHT_ORDER)
     return segments
 
 

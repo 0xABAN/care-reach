@@ -873,26 +873,25 @@ class TaughtMoveTests(DashboardBase):
         self.assertIsNone(arm.hold)
         self.assertIsNone(arm.error)
         self.assertEqual(both_moving_while_carrying, 0)
-        self.assertGreater(both_moving_free, 0)  # Reaching stays smooth.
+        self.assertEqual(both_moving_free, 0)  # Reaching is one motor at a time too.
         for index, name in enumerate(JOINT_NAMES[:5]):
             self.assertLessEqual(abs(bus.positions[name] - lifted[index]), POSE_TOLERANCE, name)
 
-    def test_taught_segments_split_only_loaded_steps(self):
-        from arm_control.arm import taught_segments
+    def test_taught_segments_move_one_motor_at_a_time_everywhere(self):
+        from server import taught_segments
         home = self.HOME
         open_ = self.offset(0, 300, -300, 0, 0, 200)
         closed = self.offset(0, 300, -300, 0, 0, -300)
         lifted = self.offset(0, 60, -500, 200, 0, -300)
-        segments = taught_segments(home, [open_, closed, lifted])
-        self.assertEqual(segments[:2], [(home, open_), (open_, closed)])
-        loaded = segments[2:]
-        self.assertEqual(len(loaded), 3)
-        self.assertEqual(loaded[0][1][2], lifted[2])   # Elbow first...
-        self.assertEqual(loaded[0][1][1], closed[1])   # ...shoulder still.
-        self.assertEqual(loaded[1][1][1], lifted[1])   # Then shoulder.
-        self.assertEqual(loaded[-1][1], lifted)
         press = [self.offset(100, 150, -150, 60, 0, 0), self.HOME]
-        self.assertEqual(taught_segments(home, press), [(home, press[0]), (press[0], home)])
+        for steps in ([open_, closed, lifted], press):
+            segments = taught_segments(home, steps)
+            for begin, end in segments:
+                changed = [index for index in range(6) if begin[index] != end[index]]
+                self.assertEqual(len(changed), 1, (begin, end))
+            self.assertEqual(segments[-1][1], steps[-1])
+        first = taught_segments(home, [open_])
+        self.assertEqual([next(i for i in range(6) if a[i] != b[i]) for a, b in first], [2, 1, 5])
 
     def run_steps(self, arm):
         start = time.monotonic()
