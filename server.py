@@ -337,6 +337,8 @@ def handler_for(arm, port):
                     result = arm.teach_add(data.get("move"))
                 elif path == "/api/teach/clear":
                     result = arm.teach_clear(data.get("move"))
+                elif path == "/api/teach/speed":
+                    result = arm.teach_speed(data.get("move"), data.get("speed"))
                 elif path == "/api/pose/stop":
                     result = arm.pose_stop()
                 elif path == "/api/scale":

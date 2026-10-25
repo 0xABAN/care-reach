@@ -879,6 +879,48 @@ class TaughtMoveTests(DashboardBase):
         press = [self.offset(100, 150, -150, 60, 0, 0), self.HOME]
         self.assertEqual(taught_segments(home, press), [(home, press[0]), (press[0], home)])
 
+    def run_steps(self, arm):
+        start = time.monotonic()
+        for step in range(1, 20000):
+            if arm.hold is None:
+                return step
+            arm._advance(start + step * 0.05)
+        self.fail("taught move did not finish")
+
+    def test_speed_setting_persists_and_old_files_default_to_1x(self):
+        bus = FakeBus(self.HOME)
+        arm = self.taught_arm(bus)
+        self.assertEqual(arm.state()["taught_speeds"], {"press_button": 1.0, "lift_this": 1.0})
+        self.teach(arm, bus, "lift_this", [self.offset(0, 200, -200, 0, 0, 0)])
+        arm.teach_speed("lift_this", 2)
+        self.assertEqual(json.loads(self.taught_path.read_text())["speeds"]["lift_this"], 2.0)
+        from arm_control.arm import load_taught, load_taught_speeds
+        self.assertEqual(load_taught_speeds(self.taught_path)["lift_this"], 2.0)
+        self.assertEqual(len(load_taught(self.taught_path)["lift_this"]), 1)
+        for bad in (3, 0.5, "2", True, None):
+            with self.assertRaisesRegex(ValueError, "speed must be"):
+                arm.teach_speed("lift_this", bad)
+        old = self.taught_path.parent / "old.json"
+        old.write_text(json.dumps({"lift_this": [], "press_button": []}))
+        self.assertEqual(load_taught_speeds(old), {"press_button": 1.0, "lift_this": 1.0})
+
+    def test_2x_speed_finishes_faster_within_command_limits(self):
+        from arm_control.arm import MAX_COMMAND_SPEED, taught_limits
+        far = self.offset(300, 600, -600, 300, 0, 0)
+        durations = {}
+        for speed in (1, 2):
+            bus = TrackingBus(self.HOME)
+            arm = self.taught_arm(bus)
+            self.teach(arm, bus, "press_button", [far, self.HOME])
+            arm.teach_speed("press_button", speed)
+            arm.pose_start("press_button")
+            durations[speed] = self.run_steps(arm)
+            self.assertIsNone(arm.error)
+            self.assertLessEqual(max(bus.leads), 120)
+        self.assertLess(durations[2], durations[1] * 0.8)
+        vmax, _ = taught_limits(2.0)
+        self.assertTrue(all(v <= cap for v, cap in zip(vmax, MAX_COMMAND_SPEED)))
+
     def test_stop_cancels_taught_move_and_holds_measured(self):
         bus = TrackingBus(self.HOME)
         arm = self.taught_arm(bus)

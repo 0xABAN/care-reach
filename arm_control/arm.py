@@ -70,6 +70,8 @@ TAUGHT_PATH = ROOT / "taught_moves.json"
 TAUGHT_MAX_STEPS = 12
 TAUGHT_VMAX = (120, 90, 120, 90, 100, 120)
 TAUGHT_AMAX = (240, 180, 240, 180, 200, 240)
+# Per-move playback speed, chosen on the dashboard. Capped by MAX_COMMAND_*.
+TAUGHT_SPEEDS = (1.0, 1.5, 2.0)
 TAUGHT_MAX_LEAD = (POSE_MAX_LEAD, 120, 120, POSE_MAX_LEAD, POSE_MAX_LEAD, POSE_MAX_LEAD)
 TAUGHT_SETTLE_TOLERANCE = 60
 POSE_NAMES = ("home", "extend", "dance") + TAUGHT_MOVES
@@ -93,6 +95,27 @@ def load_taught(path: Path) -> dict[str, list[tuple[int, ...]]]:
                 raise ValueError(f"{path}: each {name} step must be six integer ticks")
         moves[name] = [tuple(step) for step in steps]
     return moves
+
+def load_taught_speeds(path: Path) -> dict[str, float]:
+    """Saved playback speed per taught move; missing or unknown values are 1x."""
+    speeds = {name: 1.0 for name in TAUGHT_MOVES}
+    if not path.is_file():
+        return speeds
+    saved = json.loads(path.read_text(encoding="utf-8")).get("speeds", {})
+    if isinstance(saved, dict):
+        for name in TAUGHT_MOVES:
+            value = saved.get(name)
+            if type(value) in (int, float) and float(value) in TAUGHT_SPEEDS:
+                speeds[name] = float(value)
+    return speeds
+
+
+def taught_limits(speed: float) -> tuple[tuple[float, ...], tuple[float, ...]]:
+    """Speed and acceleration limits for a taught move at ``speed``."""
+    vmax = tuple(min(v * speed, cap) for v, cap in zip(TAUGHT_VMAX, MAX_COMMAND_SPEED))
+    amax = tuple(min(a * speed, cap) for a, cap in zip(TAUGHT_AMAX, MAX_COMMAND_ACCELERATION))
+    return vmax, amax
+
 
 # While carrying, lift one heavy joint at a time: elbow, then shoulder, then
 # the rest. Moving both together can sag the supply below MIN_VOLTAGE_RAW.
@@ -168,6 +191,7 @@ class Arm:
         self.extended = extended_target()
         self.taught_path = Path(taught_path)
         self.taught = load_taught(self.taught_path)
+        self.taught_speed = load_taught_speeds(self.taught_path)
         self.bounds = SafetyBounds.from_files(self.settings_path, self.calibration_path)
         self.park_bounds = folded_bounds(home_bounds(self.bounds, self.home), self.folded)
         self.hold = None
@@ -560,6 +584,7 @@ class Arm:
                                     and not any(m["fault"] for m in motors),
                 "extended_ticks": dict(zip(JOINT_NAMES, self.extended, strict=True)),
                 "taught_moves": {name: len(steps) for name, steps in self.taught.items()},
+                "taught_speeds": dict(self.taught_speed),
                 "pose": {
                     "active": pose is not None,
                     "name": pose["pose"] if pose else None,
@@ -728,8 +753,9 @@ class Arm:
             )
             if taught:
                 trajectory = []
+                vmax, amax = taught_limits(self.taught_speed[pose])
                 for begin, end in taught_segments(start_ticks, self.taught[pose]):
-                    trajectory += quintic_segment(begin, end, TAUGHT_VMAX, TAUGHT_AMAX, EXTEND_FPS)
+                    trajectory += quintic_segment(begin, end, vmax, amax, EXTEND_FPS)
             elif coordinated:
                 trajectory = quintic_segment(start_ticks, target, EXTEND_VMAX, EXTEND_AMAX, EXTEND_FPS)
             else:
@@ -1164,8 +1190,23 @@ class Arm:
             self.telemetry.write("taught_move_cleared", move=move)
             return {"move": move, "steps": 0}
 
+    def teach_speed(self, move, speed):
+        """Choose the playback speed of a taught move."""
+        with self.lock:
+            if move not in TAUGHT_MOVES:
+                raise ValueError(f"move must be one of {', '.join(TAUGHT_MOVES)}")
+            if type(speed) not in (int, float) or float(speed) not in TAUGHT_SPEEDS:
+                raise ValueError("speed must be 1, 1.5, or 2")
+            if self.hold is not None and self.hold.get("pose") == move:
+                raise ValueError("Stop this move before changing its speed")
+            self.taught_speed[move] = float(speed)
+            self._save_taught()
+            self.telemetry.write("taught_speed_set", move=move, speed=float(speed))
+            return {"move": move, "speed": float(speed)}
+
     def _save_taught(self):
         data = {name: [list(step) for step in steps] for name, steps in self.taught.items()}
+        data["speeds"] = dict(self.taught_speed)
         temporary = self.taught_path.with_suffix(".tmp")
         temporary.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
         temporary.replace(self.taught_path)

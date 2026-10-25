@@ -37,6 +37,9 @@
     .teach summary { cursor: pointer; font-weight: 700; }
     .teach-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-top: 10px; }
     .teach-row .name { min-width: 130px; }
+    .teach-row .speeds { display: inline-flex; gap: 4px; align-items: center; }
+    .teach-row .speeds button { min-width: 52px; }
+    .teach-row .speeds button.active { background: #197f86; border-color: #7ed7dc; }
     .grid { display: grid; gap: 12px; }
     .joint { background: #1c2a32; border: 1px solid #33454f; border-radius: 14px; padding: 17px; display: grid; grid-template-columns: minmax(155px,1.2fr) minmax(215px,1.5fr) minmax(180px,1fr) minmax(245px,1.5fr); gap: 16px; align-items: center; }
     .joint.moving { border-color: #7ed7dc; box-shadow: inset 0 0 0 1px #7ed7dc; }
@@ -108,8 +111,8 @@
     <details class="teach" id="teach">
       <summary>Teach moves</summary>
       <p class="muted">Jog the arm to each position in order, then press Save. Playback moves smoothly through the saved steps. For Lift this, save an open-gripper step above the object, one lowered around it, one with the gripper closed, then one lifted. The gripper may stop on the object; that counts as a grip.</p>
-      <div class="teach-row" data-move="press_button"><span class="name">Press button</span><span class="muted steps">0 steps</span><button class="save">Save current position</button><button class="clear">Clear</button></div>
-      <div class="teach-row" data-move="lift_this"><span class="name">Lift this</span><span class="muted steps">0 steps</span><button class="save">Save current position</button><button class="clear">Clear</button></div>
+      <div class="teach-row" data-move="press_button"><span class="name">Press button</span><span class="muted steps">0 steps</span><button class="save">Save current position</button><button class="clear">Clear</button><span class="speeds" role="group" aria-label="Playback speed"><span class="muted">Speed</span><button data-speed="1">1×</button><button data-speed="1.5">1.5×</button><button data-speed="2">2×</button></span></div>
+      <div class="teach-row" data-move="lift_this"><span class="name">Lift this</span><span class="muted steps">0 steps</span><button class="save">Save current position</button><button class="clear">Clear</button><span class="speeds" role="group" aria-label="Playback speed"><span class="muted">Speed</span><button data-speed="1">1×</button><button data-speed="1.5">1.5×</button><button data-speed="2">2×</button></span></div>
     </details>
     <details class="history"><summary>Recent power and servo events</summary><ul id="fault-history"><li>Loading…</li></ul></details>
     <div id="joints" class="grid"></div>
@@ -635,6 +638,11 @@
           row.querySelector('.steps').textContent = `${steps} step${steps === 1 ? '' : 's'}`;
           row.querySelector('.save').disabled = poseActive || state.holding !== null || !state.motors.every(m => m.motion_enabled);
           row.querySelector('.clear').disabled = !steps || (poseActive && pose.name === move);
+          const speed = (state.taught_speeds || {})[move] || 1;
+          for (const button of row.querySelectorAll('.speeds button')) {
+            button.classList.toggle('active', Number(button.dataset.speed) === speed);
+            button.disabled = poseActive && pose.name === move;
+          }
         }
         document.getElementById('hold-all').disabled = !state.hold_all_enabled || poseActive;
         document.getElementById('hold-all').title = (state.movement_mode || 'coordinated') !== 'coordinated' ? 'Select coordinated mode to hold all joints' : '';
@@ -670,6 +678,12 @@
         try { const r = await api('/api/teach/add', {move}); show(`Saved step ${r.steps} of ${move}.`); await refresh(); }
         catch (error) { show(error.message, true); }
       });
+      for (const button of row.querySelectorAll('.speeds button')) {
+        button.addEventListener('click', async () => {
+          try { await api('/api/teach/speed', {move, speed: Number(button.dataset.speed)}); show(`${move} speed set to ${button.textContent}.`); await refresh(); }
+          catch (error) { show(error.message, true); }
+        });
+      }
       row.querySelector('.clear').addEventListener('click', async () => {
         if (!confirm(`Clear every saved step of ${move}?`)) return;
         try { await api('/api/teach/clear', {move}); show(`${move} cleared.`); await refresh(); }
