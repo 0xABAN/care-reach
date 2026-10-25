@@ -1071,6 +1071,25 @@ class TaughtMoveTests(DashboardBase):
         with self.assertRaisesRegex(RuntimeError, "Motor 2 is too hot"):
             arm._check_snapshot(snapshot)
 
+    def test_supply_resting_at_5_2_v_does_not_freeze_a_taught_move(self):
+        bus = TrackingBus(self.HOME)
+        bus.voltages = {name: 52 for name in JOINT_NAMES}
+        arm = self.taught_arm(bus)
+        self.teach(arm, bus, "press_button", [self.offset(150, 200, -200, 80, 0, 0), self.HOME])
+        original = bus.sync_write
+
+        def light_load(register, values, normalize=True):
+            original(register, values, normalize)
+            if register == "Goal_Position":
+                moving = any(values[name] != bus.positions[name] for name in JOINT_NAMES)
+                bus.voltages = {name: 51 if moving else 52 for name in JOINT_NAMES}
+
+        bus.sync_write = light_load
+        arm.pose_start("press_button")
+        steps = self.run_steps(arm)
+        self.assertIsNone(arm.error)
+        self.assertLess(steps, 1500)  # Moves on; a light load at 5.1 V is not a reason to crawl.
+
     def test_stop_cancels_taught_move_and_holds_measured(self):
         bus = TrackingBus(self.HOME)
         arm = self.taught_arm(bus)

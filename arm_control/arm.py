@@ -79,9 +79,12 @@ TAUGHT_MOVE_SPEEDS = {"bring_to_mouth": (1.0,)}
 TAUGHT_MAX_LEAD = (POSE_MAX_LEAD, 120, 120, POSE_MAX_LEAD, POSE_MAX_LEAD, POSE_MAX_LEAD)
 TAUGHT_SETTLE_TOLERANCE = 60
 # Shared supply: pushing harder draws more current and sags every servo. In
-# taught and staged moves, ease the push whenever any servo drops below 5.2 V
-# so the bus stays near 5.1-5.2 V like a manual jog, far from the 4.8 V stop.
+# taught and staged moves, ease the push when any servo drops 0.1 V below the
+# resting voltage measured at the start of the move (at most 5.2 V), so the bus
+# stays near 5.1-5.2 V like a manual jog, far from the 4.8 V stop. The
+# threshold follows the supply: a 5.2 V rest must not ease at every small load.
 VOLTAGE_EASE_RAW = 52
+VOLTAGE_EASE_DROP = 1
 TAUGHT_EASE_MIN = 0.25
 TAUGHT_EASE_RECOVERY = 0.02  # Per control step; about 2.5 s back to full push.
 POSE_NAMES = ("home", "extend", "dance") + TAUGHT_MOVES
@@ -1289,7 +1292,11 @@ class Arm:
         easing = False
         if taught:
             low_voltage = min(snapshot[name]["voltage"] for name in JOINT_NAMES)
-            easing = low_voltage < VOLTAGE_EASE_RAW
+            if "rest_voltage" not in hold:
+                hold["rest_voltage"] = low_voltage
+            threshold = max(MIN_VOLTAGE_RAW + 1,
+                            min(VOLTAGE_EASE_RAW, hold["rest_voltage"] - VOLTAGE_EASE_DROP))
+            easing = low_voltage < threshold
             ease = hold.get("ease", 1.0)
             ease = (max(TAUGHT_EASE_MIN, ease * 0.5) if easing
                     else min(1.0, ease + TAUGHT_EASE_RECOVERY))
@@ -1330,7 +1337,7 @@ class Arm:
                     settled.add(name)
             distance = frame[index] - position
             lead = leads[index]
-            behind |= abs(distance) > lead or easing
+            behind |= abs(distance) > lead
             goals[name] = position + max(-lead, min(lead, distance))
         validate_pose(tuple(goals[name] for name in JOINT_NAMES), envelope)
         for name in JOINT_NAMES:
