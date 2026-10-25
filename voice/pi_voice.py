@@ -23,16 +23,17 @@ COMMANDS = {"open_gripper", "close_gripper", "home", "extend", "dance",
             "stop", "cancel", "pick_up_can", "none"} | TAUGHT_COMMANDS
 POSE_COMMANDS = {"home", "extend", "dance"} | TAUGHT_COMMANDS
 MOTION_COMMANDS = POSE_COMMANDS | {"open_gripper", "close_gripper"}
+DIRECT_ACTIONS = {"open_gripper", "close_gripper", "home", "extend", "dance"}
 WAKE_PATTERN = re.compile(r"\bhey[\s,.!?-]+arm\b", re.IGNORECASE)
 
 # Cartesia can put a clear request inside a longer final turn when other
 # people are talking. Match the request near the wake word, then ignore
 # unrelated words later in that same turn.
 COMMAND_PATTERNS = {
-    "open_gripper": r"(?:open|release) (?:the |your )?(?:gripper|claw|hand|fingers)",
+    "open_gripper": r"(?:open|release) (?:(?:the|your) )?(?:gripper|claw|hand|fingers|it)",
     "close_gripper": r"(?:close|shut) (?:the |your )?(?:gripper|claw|hand|fingers)",
     "home": (r"(?:retract(?: the arm)?|attract|go (?:to )?(?:the )?home(?: position)?|"
-             r"return (?:to )?home|home the arm|move (?:the arm|it) home)"),
+             r"return (?:to )?home|home the arm|move (?:the arm|it) home|home)"),
     "extend": r"(?:extend(?: the arm)?|(?:raise|point|move) (?:the arm|it) straight up)",
     "dance": r"(?:dance(?: for me)?|do (?:a|the) dance|start (?:the )?dance)",
     "lift_this": (r"(?:(?:lift|pick up|grab) (?:the )?(?:this|that|it|object|thing)(?: up)?|"
@@ -208,6 +209,11 @@ class PiVoiceTest(VoiceTest):
 
     def choose_command(self, text: str) -> str | None:
         self.command_latency_ms = None
+        direct = local_request(text)
+        if direct in DIRECT_ACTIONS:
+            self.command_backend = "Local"
+            self.command_latency_ms = 0
+            return direct
         try:
             command, self.command_latency_ms = classify_jev(
                 jev_state(text), self.openrouter_key, self.openrouter_model)
@@ -260,6 +266,8 @@ class PiVoiceTest(VoiceTest):
                 return "Not executed: arm is already moving"
             if command in POSE_COMMANDS:
                 if not state.get("pose_enabled"):
+                    if state.get("movement_mode") in {"shoulder_isolated", "single_joint"}:
+                        return "Not executed: select coordinated mode for this pose"
                     return "Not executed: a joint is not ready for a group pose"
                 if command in TAUGHT_COMMANDS and not state.get("taught_moves", {}).get(command):
                     return f"Not executed: {command} has not been taught on the dashboard yet"
@@ -271,17 +279,17 @@ class PiVoiceTest(VoiceTest):
             if not gripper.get("motion_enabled") or gripper.get("fault"):
                 return "Not executed: gripper is not ready"
             if command == "open_gripper":
-                target = min(gripper["position"] + 120, gripper["effective_upper"])
+                target = gripper["effective_upper"]
                 distance = target - gripper["position"]
                 direction = "Opening"
             else:
-                target = max(gripper["position"] - 120, gripper["effective_lower"])
+                target = gripper["effective_lower"]
                 distance = gripper["position"] - target
                 direction = "Closing"
-            if distance < 50:
+            if distance <= 0:
                 return "Not executed: gripper is already near that limit"
             self.dashboard_request(f"{ROBOT_URL}/api/motor6/go", {"target": target}, timeout=5)
-            return f"{direction} gripper to tick {target} (120 tick maximum)"
+            return f"{direction} gripper to tick {target}"
         except (HTTPError, URLError, TimeoutError, ValueError, KeyError, StopIteration) as exc:
             return f"Gripper action failed: {type(exc).__name__}"
 

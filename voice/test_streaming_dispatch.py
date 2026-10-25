@@ -186,8 +186,7 @@ class StreamingDispatchTest(unittest.TestCase):
                 self.final_turn(turn)
                 self.assertIn(("http://127.0.0.1:8765/api/pose/start", {"pose": "home"}),
                               self.requests, turn)
-        self.assertEqual([call.args[0] for call in classify.call_args_list],
-                         ["retract", "retract", "retract", "retract", "attract"])
+        classify.assert_not_called()
 
     def test_background_near_other_commands(self):
         for turn, pose in (
@@ -198,11 +197,11 @@ class StreamingDispatchTest(unittest.TestCase):
             self.final_turn(turn)
             self.assertIn(("http://127.0.0.1:8765/api/pose/start", {"pose": pose}),
                           self.requests)
-            self.assertEqual(self.jev_mock.call_args.args[0], pose)
+            self.jev_mock.assert_not_called()
         self.requests.clear()
         self.final_turn("Long noisy discussion hey arm open the hand there is other speech")
         self.assertTrue(any(url.endswith("/api/motor6/go") for url, _ in self.requests))
-        self.assertEqual(self.jev_mock.call_args.args[0], "open the hand")
+        self.jev_mock.assert_not_called()
 
     def test_descriptive_speech_is_not_trimmed_into_a_command(self):
         for spoken, expected in (("Hey Arm I saw the robot dance", "I saw the robot dance"),
@@ -249,12 +248,42 @@ class StreamingDispatchTest(unittest.TestCase):
             self.final_turn("Hey Arm bring the arm back or point it upright")
             self.assertFalse(any(url.endswith("/api/pose/start") for url, _ in self.requests))
 
-    def test_open_and_close_hand_use_jev_for_gripper_actions(self):
-        for phrase in ("open the hand", "close the hand"):
+    def test_five_direct_actions_use_local_commands_and_absolute_targets(self):
+        for phrase, endpoint in (("open the hand", 900), ("open it", 900),
+                                 ("close the hand", 100)):
             self.requests.clear()
             self.final_turn(f"Hey Arm {phrase}")
-            self.assertTrue(any(url.endswith("/api/motor6/go") for url, _ in self.requests))
-            self.assertEqual(self.app.command_backend, "Jev")
+            self.assertIn(("http://127.0.0.1:8765/api/motor6/go", {"target": endpoint}),
+                          self.requests)
+            self.assertEqual(self.app.command_backend, "Local")
+        for phrase, pose in (("home", "home"), ("extend", "extend"),
+                             ("dance", "dance")):
+            self.requests.clear()
+            self.final_turn(f"Hey Arm {phrase}")
+            self.assertIn(("http://127.0.0.1:8765/api/pose/start", {"pose": pose}),
+                          self.requests)
+            self.assertEqual(self.app.command_backend, "Local")
+        self.jev_mock.assert_not_called()
+
+    def test_gripper_finishes_a_short_remaining_distance(self):
+        self.robot_state["motors"][0]["position"] = 880
+        self.final_turn("Hey Arm open it")
+        self.assertIn(("http://127.0.0.1:8765/api/motor6/go", {"target": 900}),
+                      self.requests)
+        self.robot_state["motors"][0]["position"] = 120
+        self.requests.clear()
+        self.final_turn("Hey Arm close the hand")
+        self.assertIn(("http://127.0.0.1:8765/api/motor6/go", {"target": 100}),
+                      self.requests)
+
+    def test_gripper_at_endpoint_does_not_send_a_go_command(self):
+        self.robot_state["motors"][0]["position"] = 900
+        self.final_turn("Hey Arm open it")
+        self.assertFalse(any(url.endswith("/api/motor6/go") for url, _ in self.requests))
+        self.robot_state["motors"][0]["position"] = 100
+        self.requests.clear()
+        self.final_turn("Hey Arm close the hand")
+        self.assertFalse(any(url.endswith("/api/motor6/go") for url, _ in self.requests))
 
     def test_pose_busy_or_fault_state(self):
         self.robot_state["pose"]["active"] = True
