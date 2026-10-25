@@ -830,6 +830,55 @@ class TaughtMoveTests(DashboardBase):
         with self.assertRaisesRegex(RuntimeError, "Motor 2 stalled"):
             self.run_pose(arm)
 
+    def test_loaded_lift_moves_elbow_then_shoulder_one_at_a_time(self):
+        open_ = self.offset(0, 150, -150, 0, 0, 200)
+        lowered = self.offset(0, 300, -300, 0, 0, 200)
+        closed = self.offset(0, 300, -300, 0, 0, -300)
+        lifted = self.offset(0, 60, -500, 200, 0, -300)
+        bus = TrackingBus(self.HOME)
+        arm = self.taught_arm(bus)
+        self.teach(arm, bus, "lift_this", [open_, lowered, closed, lifted])
+        arm.pose_start("lift_this")
+        both_moving_while_carrying = 0
+        both_moving_free = 0
+        start = time.monotonic()
+        for step in range(1, 6000):
+            if arm.hold is None:
+                break
+            before = bus.positions.copy()
+            arm._advance(start + step * 0.05)
+            moved = {name for name in ("shoulder_lift", "elbow_flex")
+                     if abs(bus.positions[name] - before[name]) > 2}
+            carrying = bus.positions["gripper"] < self.HOME[5]
+            if moved == {"shoulder_lift", "elbow_flex"}:
+                if carrying:
+                    both_moving_while_carrying += 1
+                else:
+                    both_moving_free += 1
+        self.assertIsNone(arm.hold)
+        self.assertIsNone(arm.error)
+        self.assertEqual(both_moving_while_carrying, 0)
+        self.assertGreater(both_moving_free, 0)  # Reaching stays smooth.
+        for index, name in enumerate(JOINT_NAMES[:5]):
+            self.assertLessEqual(abs(bus.positions[name] - lifted[index]), POSE_TOLERANCE, name)
+
+    def test_taught_segments_split_only_loaded_steps(self):
+        from arm_control.arm import taught_segments
+        home = self.HOME
+        open_ = self.offset(0, 300, -300, 0, 0, 200)
+        closed = self.offset(0, 300, -300, 0, 0, -300)
+        lifted = self.offset(0, 60, -500, 200, 0, -300)
+        segments = taught_segments(home, [open_, closed, lifted])
+        self.assertEqual(segments[:2], [(home, open_), (open_, closed)])
+        loaded = segments[2:]
+        self.assertEqual(len(loaded), 3)
+        self.assertEqual(loaded[0][1][2], lifted[2])   # Elbow first...
+        self.assertEqual(loaded[0][1][1], closed[1])   # ...shoulder still.
+        self.assertEqual(loaded[1][1][1], lifted[1])   # Then shoulder.
+        self.assertEqual(loaded[-1][1], lifted)
+        press = [self.offset(100, 150, -150, 60, 0, 0), self.HOME]
+        self.assertEqual(taught_segments(home, press), [(home, press[0]), (press[0], home)])
+
     def test_stop_cancels_taught_move_and_holds_measured(self):
         bus = TrackingBus(self.HOME)
         arm = self.taught_arm(bus)

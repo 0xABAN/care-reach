@@ -94,6 +94,34 @@ def load_taught(path: Path) -> dict[str, list[tuple[int, ...]]]:
         moves[name] = [tuple(step) for step in steps]
     return moves
 
+# While carrying, lift one heavy joint at a time: elbow, then shoulder, then
+# the rest. Moving both together can sag the supply below MIN_VOLTAGE_RAW.
+CARRY_ORDER = ((2,), (1,), (0, 3, 4))
+
+
+def taught_segments(start, steps):
+    """Waypoint pairs to replay; loaded segments are split joint by joint."""
+    grips = [step[5] for step in steps]
+    closes = any(later < earlier - POSE_TOLERANCE for earlier, later in zip(grips, grips[1:]))
+    closed = min(grips)
+    segments = []
+    for begin, end in zip((tuple(start), *steps), steps):
+        carrying = (closes and abs(end[5] - begin[5]) <= POSE_TOLERANCE
+                    and begin[5] <= closed + POSE_TOLERANCE)
+        if not carrying:
+            segments.append((tuple(begin), tuple(end)))
+            continue
+        current = list(begin)
+        for joints in CARRY_ORDER:
+            following = list(current)
+            for index in joints:
+                following[index] = end[index]
+            if following != current:
+                segments.append((tuple(current), tuple(following)))
+                current = following
+    return segments
+
+
 def find_port():
     ports = [p.device for p in list_ports.comports() if p.vid == 0x1A86 and p.pid == 0x55D3]
     if len(ports) != 1:
@@ -700,7 +728,7 @@ class Arm:
             )
             if taught:
                 trajectory = []
-                for begin, end in zip((start_ticks, *self.taught[pose]), self.taught[pose]):
+                for begin, end in taught_segments(start_ticks, self.taught[pose]):
                     trajectory += quintic_segment(begin, end, TAUGHT_VMAX, TAUGHT_AMAX, EXTEND_FPS)
             elif coordinated:
                 trajectory = quintic_segment(start_ticks, target, EXTEND_VMAX, EXTEND_AMAX, EXTEND_FPS)
