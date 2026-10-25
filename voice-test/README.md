@@ -2,6 +2,20 @@
 
 This test listens to the USB microphone through FFmpeg, detects utterances locally, and sends each detected utterance to Cartesia's hosted `ink-whisper` speech-to-text model. It shows the transcript, “Hey Arm” wake decision, selected command, and API response time at `http://127.0.0.1:8765`. The dashboard only binds to this Mac. No Raspberry Pi or arm motors are connected.
 
+## Live transcript stream (Ink 2 over WebSocket)
+
+For a minimal microphone-to-text stream with no command parsing or robot connection, install the dependencies and run:
+
+```sh
+python3 -m venv voice-test/.venv
+voice-test/.venv/bin/python -m pip install -r voice-test/requirements-stream.txt
+voice-test/.venv/bin/python voice-test/cartesia_mic_stream.py
+```
+
+The script reads `CARTESIA_API_KEY` from the environment (on this Mac it also checks the existing `calhacks-cartesia` Keychain item), streams 16 kHz mono microphone audio to Cartesia Ink 2, and prints cumulative partial transcripts as they arrive. Each completed utterance is printed once. Choose a microphone with `--device 1` or `--device "USB microphone name"`; list devices with `voice-test/.venv/bin/python -c 'import sounddevice as sd; print(sd.query_devices())'`. To consume events in another program, use `voice-test/.venv/bin/python voice-test/cartesia_mic_stream.py --jsonl`, which writes `partial` and `final` JSON Lines to stdout. Press Ctrl+C to stop. This sends microphone audio to Cartesia while running and may incur API charges.
+
+On Raspberry Pi OS, install PortAudio first (`sudo apt install libportaudio2`), install the same Python requirements, and set `CARTESIA_API_KEY` in the environment before running. The listener only prints text; it does not interpret commands or control the robot.
+
 ## Start
 
 ```sh
