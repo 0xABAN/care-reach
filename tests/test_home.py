@@ -81,6 +81,14 @@ class HomeTests(unittest.TestCase):
             self.assertGreater(timing[field]["count"], 0, field)
         self.assertLessEqual(timing["compute_ms"]["mean_ms"], timing["cycle_ms"]["mean_ms"] + 1e-9)
 
+    def test_injected_fake_bus_does_not_take_default_lock(self):
+        bus = FakeBus("unused", list(home_lib.NAMES))
+        with patch.object(home_lib, "BusLock", side_effect=AssertionError("unexpected real lock")), \
+             patch.object(home_lib.time, "sleep"):
+            result = home_lib.run_home("unused", speed=4, bus_factory=lambda _: bus)
+        self.assertGreater(result["cycles"], 0)
+        self.assertEqual(bus.disconnected_with, False)
+
 
 if __name__ == "__main__":
     unittest.main()

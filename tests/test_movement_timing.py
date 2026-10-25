@@ -80,6 +80,8 @@ class MovementTimingTests(TimingBase):
             self.assertLessEqual(window["mean_ms"], window["max_ms"] + 1e-9, field)
         self.assertGreater(timing["stop_command_ms"], 0)
         self.assertGreater(timing["motion_elapsed_ms"], 0)
+        self.assertGreater(timing["first_command_ms"], 0)
+        self.assertLess(timing["first_command_ms"], timing["motion_elapsed_ms"])
         self.assertLess(timing["compute_ms"]["mean_ms"], timing["cycle_ms"]["mean_ms"])
 
     def test_start_and_stop_records_share_one_token(self):
@@ -98,6 +100,24 @@ class MovementTimingTests(TimingBase):
         self.assertEqual([r["token"] for r in stopped], [first, second])
         self.assertNotEqual(first, second)
 
+    def test_compute_time_excludes_a_slow_serial_read(self):
+        clock = FakeClock()
+
+        class SlowBus(FakeBus):
+            def sync_read(self, *args, **kwargs):
+                clock._ns += 10_000_000  # A measured 10 ms bus call.
+                return super().sync_read(*args, **kwargs)
+
+        arm = self.arm_with_clock(SlowBus((2000,) * 6), clock)
+        arm.start(1, 1)
+        clock.advance(0.05)
+        arm._advance(clock.monotonic())
+        timing = arm.timing.summary()
+        self.assertGreater(timing["bus_read_ms"]["count"], 0)
+        self.assertGreater(
+            timing["cycle_ms"]["mean_ms"] - timing["compute_ms"]["mean_ms"], 50
+        )
+
     def test_pose_completion_emits_token_and_timing(self):
         clock = FakeClock()
         arm = self.arm_with_clock(TrackingBus((2000,) * 6), clock)
@@ -113,6 +133,7 @@ class MovementTimingTests(TimingBase):
         self.assertEqual(completed[0]["token"], result["token"])
         self.assertEqual(completed[0]["pose"], "extend")
         self.assertGreater(completed[0]["timing"]["settle_ms"], 0)
+        self.assertGreater(completed[0]["timing"]["first_command_ms"], 0)
         self.assertGreater(completed[0]["timing"]["bus_write_ms"]["count"], 0)
         self.assertGreater(completed[0]["timing"]["compute_ms"]["count"], 0)
 
@@ -203,20 +224,35 @@ class ArmLockTests(TimingBase):
             def connect(self, handshake=True):
                 raise OSError("port disappeared")
 
+        failed_bus = ExplodingBus((2000,) * 6)
         with self.assertRaises(OSError):
-            Arm("fake", bus_factory=lambda _: ExplodingBus((2000,) * 6),
+            Arm("fake", bus_factory=lambda _: failed_bus,
                 settings_path=self.settings_path, calibration_path=self.calibration_path,
                 pose_path=self.pose_path,
                 telemetry_path=self.settings_path.parent / "telemetry2.jsonl",
                 bus_lock=BusLock(path))
+        self.assertEqual(failed_bus.disconnects, [False])
+        retry = self.arm_with_clock(FakeBus((2000,) * 6), FakeClock(), bus_lock=BusLock(path))
+        self.assertIsNotNone(retry.state())
+
+    def test_worker_start_failure_releases_bus_and_lock(self):
+        path = self.lock_path()
+        failed_bus = FakeBus((2000,) * 6)
+        with patch("arm_control.arm.threading.Thread") as thread:
+            thread.return_value.start.side_effect = RuntimeError("worker unavailable")
+            with self.assertRaisesRegex(RuntimeError, "worker unavailable"):
+                Arm("fake", bus_factory=lambda _: failed_bus,
+                    settings_path=self.settings_path, calibration_path=self.calibration_path,
+                    pose_path=self.pose_path,
+                    telemetry_path=self.settings_path.parent / "telemetry2.jsonl",
+                    bus_lock=BusLock(path))
+        self.assertEqual(failed_bus.disconnects, [False])
         retry = self.arm_with_clock(FakeBus((2000,) * 6), FakeClock(), bus_lock=BusLock(path))
         self.assertIsNotNone(retry.state())
 
     def test_fake_bus_skips_the_real_default_lock(self):
-        holder = BusLock()  # the real state-file lock
-        holder.acquire("timing-test-holder")
-        self.addCleanup(holder.release)
-        arm = self.arm_with_clock(FakeBus((2000,) * 6), FakeClock())
+        with patch("arm_control.arm.BusLock", side_effect=AssertionError("unexpected real lock")):
+            arm = self.arm_with_clock(FakeBus((2000,) * 6), FakeClock())
         self.assertIsNotNone(arm.state())
 
 

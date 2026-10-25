@@ -22,12 +22,21 @@ When a closing gripper jog ends normally or loses its heartbeat, the controller 
 
 ## Movement library
 
-Bus ownership and every movement decision live in the importable `arm_control/` package. `arm_control/arm.py` owns the URT-2 serial bus, enforces all safety limits, and drives jog, go-to-tick, Home, Extend, Dance, and taught moves; the direct runners follow in `arm_control/runtime.py` (`ArmRuntime`), `arm_control/pose_runner.py` (`MeasuredPoseRunner`), `arm_control/home.py` (the Home routine), and `arm_control/shake.py` (`WristShake`), with `arm_control/bus.py` factoring the shared STS3215 motor construction and the exclusive connection lifecycle. `server.py` is now only the HTTP/camera adapter and process entry point and re-exports `Arm`, `find_port`, and the tuning constants for existing callers. `motion_core.py` stays pure offline planning and is reused by the library unchanged. Every real-bus connection — dashboard or direct runner — holds the exclusive nonblocking file lock (`~/.local/state/care-reach/arm-bus.lock`) for its connection lifetime, so a standalone process cannot open the bus while the dashboard owns it: it fails fast with a clear busy error. Fake test buses never touch the default lock; an explicitly injected `BusLock` is always honored.
+The importable `arm_control/` package owns motor communication and movement. Its modules have separate jobs:
 
-Timing instrumentation in the library measures durations with `time.perf_counter_ns` (monotonic, immune to clock adjustment) while telemetry keeps UTC wall timestamps. All records for one motion share the motion's `token`. Each window reports `count`, `mean_ms`, and `max_ms`; `motion_stopped`, `motion_completed`, and `motion_error` records carry the full windows, and long motions also emit throttled `timing_sample` records (about every 5 s):
+- `arm.py` runs dashboard jogs, go-to-tick, Home, Extend, Dance, and taught moves with the existing safety checks.
+- `runtime.py` (`ArmRuntime`), `pose_runner.py` (`MeasuredPoseRunner`), `home.py`, and `shake.py` (`WristShake`) run the direct movement routines.
+- `bus.py` builds the six STS3215 motors and manages exclusive bus ownership.
+
+`server.py` now handles HTTP and the camera feed. It re-exports `Arm`, `find_port`, and tuning constants for existing callers. `motion_core.py` remains an offline planner with no hardware access.
+
+Each real connection holds a nonblocking lock at `~/.local/state/care-reach/arm-bus.lock` until it disconnects. A standalone program gets a busy error if the dashboard already owns the bus. Fake buses used in tests skip the default lock; a caller that explicitly supplies a `BusLock` still uses it.
+
+Timing uses `time.perf_counter_ns`, so changes to the wall clock do not affect durations. Dashboard logs still have UTC timestamps. Records for one motion share a `token`; stop, completion, and error records include timing measured so far. Long motions also log a `timing_sample` about every five seconds. Duration windows report `count`, `mean_ms`, and `max_ms`:
 
 | Field | Meaning |
 | --- | --- |
+| `first_command_ms` | From motion start to submission of its first goal write. This does not measure when the motor starts moving. |
 | `bus_read_ms` | Time spent completing serial register reads. |
 | `bus_write_ms` | Time for a serial write call to return. Addressed writes may wait for an acknowledgement; sync writes do not. This is not physical actuator latency. |
 | `compute_ms` | Python controller time per control cycle outside measured serial calls, including safety checks and telemetry. |
@@ -37,9 +46,9 @@ Timing instrumentation in the library measures durations with `time.perf_counter
 | `motion_elapsed_ms` | Time from start to stop for a stopped motion. |
 | `stop_command_ms` | Time spent reading feedback and issuing the final holding goal during stop. |
 
-The direct runners report the same windows without persistent telemetry: each CLI prints (or returns) a one-line bus/compute summary at the end of a real-bus run, alongside the existing elapsed and command counts.
+Direct runners return bus and compute timing windows without persistent telemetry. The Home, Dance, and wrist trial commands print a short summary after a completed run.
 
-Standalone CLI scripts (`dance_demo.py`, `park.py`, `home.py`, `shake_it_crazy_style.py`, `arm_runtime.py`, `measured_pose_runner.py`) are thin CLIs and backward-compatible re-export shims over the `arm_control` modules above, so they share the same motor construction and exclusive lock. Keep the dashboard stopped before running one anyway: the shared lock makes a conflicting owner fail fast with a busy error, but the arm should still have exactly one controller at a time.
+`home.py` and `shake_it_crazy_style.py` are command-line wrappers around the library. `dance_demo.py` keeps its offline planner and calls a library runner for `--execute`; `park.py` only plans the historical Fold pose offline because the wrist camera blocks execution. Existing imports of `arm_runtime.py` and `measured_pose_runner.py` still work. Stop the dashboard before a standalone hardware run so only one program controls the arm.
 
 The USB camera's [live feed](docs/CAMERA.md) appears in the dashboard's **Camera** tab at the same dashboard address. The camera service stays on Pi localhost; the dashboard relays the feed to anyone who can reach the panel.
 

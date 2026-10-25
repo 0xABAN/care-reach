@@ -55,6 +55,7 @@ class MotionTiming:
     """Per-motion aggregates for one control loop's bus and cycle durations."""
 
     def __init__(self):
+        self.first_command_ms: float | None = None
         self.read = _SampleWindow()
         self.write = _SampleWindow()
         self.compute = _SampleWindow()
@@ -62,6 +63,7 @@ class MotionTiming:
         self.lag = _SampleWindow()
 
     def reset(self) -> None:
+        self.first_command_ms = None
         self.read = _SampleWindow()
         self.write = _SampleWindow()
         self.compute = _SampleWindow()
@@ -83,6 +85,10 @@ class MotionTiming:
     def record_lag_s(self, seconds: float) -> None:
         self.lag.add(max(0, int(seconds * 1e9)))
 
+    def record_first_command_ns(self, nanoseconds: int) -> None:
+        if self.first_command_ms is None:
+            self.first_command_ms = round(max(0, nanoseconds) / 1e6, 3)
+
     def summary(self) -> dict:
         """Return unambiguous ``*_ms`` windows.
 
@@ -91,6 +97,7 @@ class MotionTiming:
         physical actuator latency.
         """
         return {
+            "first_command_ms": self.first_command_ms,
             "bus_read_ms": self.read.summary(),
             "bus_write_ms": self.write.summary(),
             "compute_ms": self.compute.summary(),

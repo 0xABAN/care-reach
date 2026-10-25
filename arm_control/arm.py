@@ -326,7 +326,15 @@ class Arm:
         name = JOINT_NAMES[motor - 1]
         if type(tick) is not int or not self.firmware_min[name] <= tick <= self.firmware_max[name]:
             raise ValueError(f"Motor {motor} target is outside firmware bounds")
+        self._mark_first_goal_write()
         self.bus.write("Goal_Position", name, tick, normalize=False, num_retry=2)
+
+    def _mark_first_goal_write(self):
+        """Measure start-to-first-goal submission, not motor response latency."""
+        if self.hold is not None and self.timing.first_command_ms is None:
+            self.timing.record_first_command_ns(
+                self.clock.perf_ns() - self.hold["started_perf_ns"]
+            )
 
     def _hold_measured(self, motor):
         name = JOINT_NAMES[motor - 1]
@@ -644,6 +652,7 @@ class Arm:
             # The previous bounded goal is already near this endpoint. Keep
             # the exact pose as the holding goal so completion does not snap
             # the target backward to a still-moving encoder reading.
+            self._mark_first_goal_write()
             self.bus.sync_write("Goal_Position", dict(zip(JOINT_NAMES, targets, strict=True)), normalize=False)
             if hold["pose"] == "dance" and hold["stage"] == "home":
                 hold["stage"] = "entry"
@@ -700,6 +709,7 @@ class Arm:
             if (direction > 0 and goal < position) or (direction < 0 and goal > position):
                 goal = position
             goals[name] = int(goal)
+        self._mark_first_goal_write()
         self.bus.sync_write("Goal_Position", goals, normalize=False)
         hold["writes"] += 1
         hold["last_update"] = now
@@ -745,6 +755,7 @@ class Arm:
             goal = positions[name] + max(-POSE_MAX_LEAD, min(POSE_MAX_LEAD, distance))
             goals[name] = int(goal)
         validate_pose(tuple(goals[name] for name in JOINT_NAMES), self.bounds)
+        self._mark_first_goal_write()
         self.bus.sync_write("Goal_Position", goals, normalize=False)
         hold["last_goals"] = goals
         if not behind:
@@ -937,21 +948,30 @@ class Arm:
         raise ValueError("Torque release is unavailable in this dashboard")
 
     def close(self):
-        with self.lock:
-            if self.closed:
-                return
-            self.closed = True
-            try:
-                self._stop()
-            finally:
+        did_close = False
+        try:
+            with self.lock:
+                if self.closed:
+                    return
+                self.closed = True
+                did_close = True
                 try:
-                    self.bus.disconnect(disable_torque=False)
+                    self._stop()
                 finally:
-                    if self._bus_lock is not None:
-                        self._bus_lock.release()
-        self.worker.join(timeout=1)
-        self.telemetry.write("controller_stopped", snapshot=self.last_snapshot)
-        self.telemetry.close()
+                    try:
+                        self.bus.disconnect(disable_torque=False)
+                    finally:
+                        if self._bus_lock is not None:
+                            self._bus_lock.release()
+        finally:
+            if did_close:
+                try:
+                    self.worker.join(timeout=1)
+                finally:
+                    try:
+                        self.telemetry.write("controller_stopped", snapshot=self.last_snapshot)
+                    finally:
+                        self.telemetry.close()
 
     def _on_upright_corridor(self, ticks):
         fractions = []
@@ -1066,6 +1086,7 @@ class Arm:
             final = dict(zip(JOINT_NAMES, hold["target"], strict=True))
             if taught:
                 final["gripper"] = max(final["gripper"], positions["gripper"] - GRIP_HOLD_LEAD)
+            self._mark_first_goal_write()
             self.bus.sync_write("Goal_Position", final, normalize=False)
             if hold["pose"] == "dance" and hold["stage"] == "home":
                 hold["trajectory"] = None
@@ -1082,6 +1103,7 @@ class Arm:
                 hold["progress"] = 1.0
                 self._complete_pose(snapshot)
             return
+        self._mark_first_goal_write()
         self.bus.sync_write("Goal_Position", goals, normalize=False)
         hold["writes"] += 1
         hold["last_update"] = now

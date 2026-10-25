@@ -294,6 +294,25 @@ class RuntimeTests(unittest.TestCase):
             self.assertFalse(bus.connected)
             self.assertEqual(bus.writes, [])
 
+    def test_partial_connect_failure_disconnects_before_releasing_lock(self):
+        class PartiallyConnectedBus(FakeBus):
+            def connect(self, handshake=True):
+                self.connected = True
+                raise OSError("handshake failed")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "arm-bus.lock"
+            lock = BusLock(path)
+            bus = PartiallyConnectedBus("unused")
+            ownership = BusOwnership("unused", bus_factory=lambda _: bus, bus_lock=lock)
+            with self.assertRaisesRegex(OSError, "handshake failed"):
+                ownership.connect()
+            self.assertEqual(bus.disconnects, [False])
+            self.assertFalse(lock.locked)
+            next_owner = BusLock(path)
+            next_owner.acquire("next-owner")
+            next_owner.release()
+
 
 if __name__ == "__main__":
     unittest.main()

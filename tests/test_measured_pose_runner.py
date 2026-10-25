@@ -184,6 +184,22 @@ class RunnerTests(unittest.TestCase):
             self.assertTrue(next_owner.locked)
             next_owner.release()
 
+    def test_disconnect_failure_still_releases_lock(self):
+        class DisconnectingBus(FakeBus):
+            def disconnect(self, disable_torque=True):
+                super().disconnect(disable_torque=disable_torque)
+                raise OSError("disconnect failed")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "arm-bus.lock"
+            lock = BusLock(path)
+            bus = DisconnectingBus("unused")
+            with self.assertRaisesRegex(OSError, "disconnect failed"):
+                MeasuredPoseRunner("unused", BOUNDS, bus_factory=lambda _: bus, bus_lock=lock,
+                                   clock=FakeClock()).move((2000,) * 6)
+            self.assertEqual(bus.disconnects, [False])
+            self.assertFalse(lock.locked)
+
 
 if __name__ == "__main__":
     unittest.main()
