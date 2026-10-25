@@ -68,8 +68,9 @@ TAUGHT_PATH = ROOT / "taught_moves.json"
 TAUGHT_MAX_STEPS = 12
 TAUGHT_VMAX = (120, 90, 120, 90, 100, 120)
 TAUGHT_AMAX = (240, 180, 240, 180, 200, 240)
-# Lifting a load needs more lead than Extend; 80 matches Home and Dance.
-TAUGHT_MAX_LEAD = POSE_MAX_LEAD
+# Lifting a load needs more lead than Extend. The shoulder (2) and elbow (3)
+# carry the arm and object, so they may push further ahead than the rest.
+TAUGHT_MAX_LEAD = (POSE_MAX_LEAD, 120, 120, POSE_MAX_LEAD, POSE_MAX_LEAD, POSE_MAX_LEAD)
 # A loaded joint may sag a little short of its last step and stop there.
 TAUGHT_SETTLE_TOLERANCE = 60
 POSE_NAMES = ("home", "extend", "dance") + TAUGHT_MOVES
@@ -721,7 +722,7 @@ class Arm:
         goals = {}
         behind = False
         taught = hold["pose"] in TAUGHT_MOVES
-        lead = TAUGHT_MAX_LEAD if taught else EXTEND_MAX_LEAD
+        leads = TAUGHT_MAX_LEAD if taught else (EXTEND_MAX_LEAD,) * 6
         last_frame = frame_index == len(frames) - 1
         settled = hold.setdefault("settled", set())
         for index, name in enumerate(JOINT_NAMES):
@@ -743,11 +744,12 @@ class Arm:
                 gap = abs(frame[index] - position)
                 # A loaded taught move only stalls when the full push cannot
                 # move it, or when it stops well short of the last step.
-                if not taught or gap > (TAUGHT_SETTLE_TOLERANCE if last_frame else lead):
+                if not taught or gap > (TAUGHT_SETTLE_TOLERANCE if last_frame else leads[index]):
                     raise RuntimeError(f"Motor {index + 1} stalled at {position}")
                 if last_frame:
                     settled.add(name)
             distance = frame[index] - position
+            lead = leads[index]
             behind |= abs(distance) > lead
             goals[name] = position + max(-lead, min(lead, distance))
         validate_pose(tuple(goals[name] for name in JOINT_NAMES), envelope)

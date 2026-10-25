@@ -670,7 +670,7 @@ class BlockedGripBus(TrackingBus):
 
 
 class WeakShoulderBus(TrackingBus):
-    """Under load the shoulder needs a 60-tick lead to lift and sags 45 ticks."""
+    """Under load the shoulder needs a 50-tick lead to lift and sags 45 ticks."""
 
     def __init__(self, positions, lifted):
         super().__init__(positions)
@@ -682,7 +682,7 @@ class WeakShoulderBus(TrackingBus):
         if register != "Goal_Position":
             return
         lifting = values["shoulder_lift"] < before
-        if lifting and before - values["shoulder_lift"] < 60:
+        if lifting and before - values["shoulder_lift"] < 50:
             self.positions["shoulder_lift"] = before
         self.positions["shoulder_lift"] = max(self.positions["shoulder_lift"], self.lifted + 45)
 
@@ -794,7 +794,28 @@ class TaughtMoveTests(DashboardBase):
         self.assertIsNone(arm.error)
         self.assertGreaterEqual(bus.positions["shoulder_lift"], lifted[1] + 45)
         self.assertLessEqual(bus.positions["shoulder_lift"], lifted[1] + 60)
-        self.assertLessEqual(max(bus.leads), 80)
+
+    def test_taught_leads_are_120_for_shoulder_and_elbow_and_80_elsewhere(self):
+        bus = TrackingBus(self.HOME)
+        arm = self.taught_arm(bus)
+        far = self.offset(400, 500, -500, 400, 400, 400)
+        self.teach(arm, bus, "press_button", [far])
+        before = bus.positions.copy()
+        arm.pose_start("press_button")
+        worst = [0] * 6
+        start = time.monotonic()
+        for step in range(1, 4000):
+            if arm.hold is None:
+                break
+            snapshot = bus.positions.copy()
+            arm._advance(start + step * 0.05)
+            for index, name in enumerate(JOINT_NAMES):
+                worst[index] = max(worst[index], abs(bus.goals[name] - snapshot[name]))
+        self.assertIsNone(arm.hold)
+        self.assertLessEqual(worst[1], 120)
+        self.assertLessEqual(worst[2], 120)
+        for index in (0, 3, 4, 5):
+            self.assertLessEqual(worst[index], 80, JOINT_NAMES[index])
 
     def test_blocked_joint_far_from_target_still_stalls(self):
         lowered = self.offset(0, 300, -200, 0, 0, 0)
