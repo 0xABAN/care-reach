@@ -1291,7 +1291,9 @@ class Arm:
                 self.telemetry.write("voltage_ease", pose=hold["pose"], voltage=low_voltage,
                                      snapshot=snapshot)
             hold["ease"] = ease
-            leads = tuple(max(10, round(lead * ease)) for lead in leads)
+        full_leads = leads
+        if taught:
+            leads = tuple(max(10, round(lead * hold["ease"])) for lead in leads)
         last_frame = frame_index == len(frames) - 1
         settled = hold.setdefault("settled", set())
         for index, name in enumerate(JOINT_NAMES):
@@ -1305,7 +1307,10 @@ class Arm:
                 # instead of treating the contact as a stall.
                 goals[name] = position - GRIP_HOLD_LEAD
                 continue
-            if abs(position - hold["progress_position"][name]) >= POSE_STALL_TICKS:
+            if (abs(position - hold["progress_position"][name]) >= POSE_STALL_TICKS
+                    or (taught and hold["ease"] < 1.0)):
+                # Progress, or a deliberately eased push waiting for voltage to
+                # recover; neither is a stall.
                 hold["progress_position"][name] = position
                 hold["progress_time"][name] = now
             elif (abs(frame[index] - position) > POSE_TOLERANCE
@@ -1313,7 +1318,7 @@ class Arm:
                 gap = abs(frame[index] - position)
                 # A loaded taught move only stalls when the full push cannot
                 # move it, or when it stops well short of the last step.
-                if not taught or gap > (TAUGHT_SETTLE_TOLERANCE if last_frame else leads[index]):
+                if not taught or gap > (TAUGHT_SETTLE_TOLERANCE if last_frame else full_leads[index]):
                     raise RuntimeError(f"Motor {index + 1} stalled at {position}")
                 if last_frame:
                     settled.add(name)

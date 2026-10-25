@@ -1030,6 +1030,28 @@ class TaughtMoveTests(DashboardBase):
         for index, name in enumerate(JOINT_NAMES):
             self.assertLessEqual(abs(bus.positions[name] - self.HOME[index]), HOME_TOLERANCE, name)
 
+    def test_eased_push_waiting_for_voltage_is_not_a_stall(self):
+        far = self.offset(-80, 400, -720, -170, 0, 0)
+        bus = VoltageSagBus(far)
+        arm = self.taught_arm(bus)
+        arm.pose_start("home")
+        start = time.monotonic()
+        eased = False
+        for step in range(1, 60000):
+            if arm.hold is None:
+                break
+            # Hold the supply low for 3 s of the elbow stage, like a weak adapter.
+            if 40 <= step < 100:
+                bus.voltages = {name: 49 for name in JOINT_NAMES}
+                arm._advance(start + step * 0.05)
+                bus.positions["elbow_flex"] = bus.positions["elbow_flex"]
+                eased |= arm.hold is not None and arm.hold.get("ease", 1.0) < 1.0
+                continue
+            arm._advance(start + step * 0.05)
+        self.assertTrue(eased)
+        self.assertIsNone(arm.hold)
+        self.assertIsNone(arm.error)
+
     def test_stop_cancels_taught_move_and_holds_measured(self):
         bus = TrackingBus(self.HOME)
         arm = self.taught_arm(bus)
