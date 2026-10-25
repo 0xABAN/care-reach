@@ -3,6 +3,7 @@
 import unittest
 from unittest.mock import patch
 
+import arm_control.home as home_lib
 import home
 
 
@@ -41,17 +42,31 @@ class FakeBus:
             self.registers[register][name] = value
 
 
+class FakeLock:
+    def __init__(self, path=None):
+        self.events = []
+
+    def acquire(self, port):
+        self.events.append(("acquire", port))
+
+    def release(self):
+        self.events.append("release")
+
+
 class HomeTests(unittest.TestCase):
     def test_speed_four_moves_all_joints_and_preserves_torque(self):
         created = []
+        lock = FakeLock()
 
-        def factory(port, motors):
-            bus = FakeBus(port, motors)
+        def factory(port):
+            bus = FakeBus(port, list(home_lib.NAMES))
             created.append(bus)
             return bus
 
-        with patch.object(home, "SerialMotorsBus", factory), patch.object(home.time, "sleep") as sleep:
-            home.main(["--speed", "4", "--port", "unused"])
+        with patch.object(home_lib, "real_bus", factory), \
+             patch.object(home_lib, "BusLock", lambda: lock), \
+             patch.object(home.time, "sleep") as sleep:
+            result = home.main(["--speed", "4", "--port", "unused"])
         bus = created[0]
         self.assertTrue(all(abs(bus.positions[name] - home.HOME[index]) <= home.TOLERANCE
                             for index, name in enumerate(home.NAMES)))
@@ -60,6 +75,11 @@ class HomeTests(unittest.TestCase):
         self.assertTrue(all(value == 1 for value in bus.registers["Torque_Enable"].values()))
         self.assertEqual(bus.disconnected_with, False)
         sleep.assert_called_with(home.FAST_PERIOD_S)
+        self.assertEqual(lock.events, [("acquire", "unused"), "release"])
+        timing = result["timing"]
+        for field in ("bus_read_ms", "bus_write_ms", "compute_ms", "cycle_ms"):
+            self.assertGreater(timing[field]["count"], 0, field)
+        self.assertLessEqual(timing["compute_ms"]["mean_ms"], timing["cycle_ms"]["mean_ms"] + 1e-9)
 
 
 if __name__ == "__main__":

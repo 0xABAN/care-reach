@@ -119,11 +119,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     from measured_pose_runner import MeasuredPoseRunner
+    from arm_control.bus import format_timing_summary
 
     result = MeasuredPoseRunner(args.port, task_bounds).move(
         target, max_lead=80, period_s=0.06, timeout_s=35, tolerance=35
     )
     print(f"fold completed in {result['elapsed_s']:.1f}s; measured {result['positions']}; torque remains enabled")
+    print(format_timing_summary(result.get("timing")))
     return 0
 
 

@@ -9,12 +9,14 @@ from pathlib import Path
 import tempfile
 import unittest
 
+from arm_control.bus_lock import BusLock
+from arm_control.shake import (
+    AMPLITUDE_TICKS, DURATION_S, HOME_TOLERANCE, WRIST, WRIST_INDEX,
+    ShakeSafetyError, WristShake, TRIAL_ACCELERATION, TRIAL_GOAL_SPEED, waveform,
+)
 from motion_core import JOINT_NAMES, SafetyBounds
 from park import HOME
-from shake_it_crazy_style import (
-    AMPLITUDE_TICKS, DURATION_S, HOME_TOLERANCE, WRIST, WRIST_INDEX,
-    ShakeSafetyError, WristShake, TRIAL_ACCELERATION, TRIAL_GOAL_SPEED, main, waveform,
-)
+from shake_it_crazy_style import main
 
 BOUNDS = SafetyBounds((1116, 903, 881, 863, 0, 1317),
                       (2597, 3223, 3200, 3110, 3300, 2742))
@@ -224,6 +226,30 @@ class WristShakeTests(unittest.TestCase):
             WristShake("unused", BOUNDS, bus_factory=lambda _: bus, owner_check=occupied).run()
         self.assertFalse(bus.connected)
         self.assertEqual(bus.writes, [])
+
+    def test_result_carries_measured_bus_and_compute_windows(self):
+        bus = FakeBus("unused")
+        result = self._run(bus)
+        timing = result["timing"]
+        for field in ("bus_read_ms", "bus_write_ms", "compute_ms", "cycle_ms"):
+            window = timing[field]
+            self.assertIsInstance(window, dict, field)
+            self.assertGreater(window["count"], 0, field)
+            self.assertLessEqual(window["mean_ms"], window["max_ms"] + 1e-9, field)
+        self.assertLessEqual(timing["compute_ms"]["mean_ms"], timing["cycle_ms"]["mean_ms"] + 1e-9)
+
+    def test_explicit_lock_is_released_after_the_connection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "arm-bus.lock"
+            lock = BusLock(path)
+            bus = FakeBus("unused")
+            WristShake("unused", BOUNDS, bus_factory=lambda _: bus, bus_lock=lock,
+                       clock=FakeClock(), owner_check=lambda _: None).run()
+            self.assertFalse(lock.locked)
+            next_owner = BusLock(path)
+            next_owner.acquire("next-owner")
+            self.assertTrue(next_owner.locked)
+            next_owner.release()
 
     def test_default_cli_is_offline(self):
         output = io.StringIO()
