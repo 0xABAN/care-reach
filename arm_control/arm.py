@@ -79,10 +79,11 @@ TAUGHT_MOVE_SPEEDS = {"bring_to_mouth": (1.0,)}
 TAUGHT_MAX_LEAD = (POSE_MAX_LEAD, 120, 120, POSE_MAX_LEAD, POSE_MAX_LEAD, POSE_MAX_LEAD)
 TAUGHT_SETTLE_TOLERANCE = 60
 # Shared supply: pushing harder draws more current and sags every servo. In
-# taught and staged moves, ease the push as voltage nears MIN_VOLTAGE_RAW and
-# wait for it to recover, instead of driving into the hard stop.
-VOLTAGE_EASE_RAW = 50
+# taught and staged moves, ease the push whenever any servo drops below 5.2 V
+# so the bus stays near 5.1-5.2 V like a manual jog, far from the 4.8 V stop.
+VOLTAGE_EASE_RAW = 52
 TAUGHT_EASE_MIN = 0.25
+TAUGHT_EASE_RECOVERY = 0.02  # Per control step; about 2.5 s back to full push.
 POSE_NAMES = ("home", "extend", "dance") + TAUGHT_MOVES
 TIMING_SAMPLE_INTERVAL_S = 5.0
 CURRENT_SAMPLE_INTERVAL_S = 0.5
@@ -1286,7 +1287,8 @@ class Arm:
             low_voltage = min(snapshot[name]["voltage"] for name in JOINT_NAMES)
             easing = low_voltage < VOLTAGE_EASE_RAW
             ease = hold.get("ease", 1.0)
-            ease = max(TAUGHT_EASE_MIN, ease * 0.5) if easing else min(1.0, ease + 0.05)
+            ease = (max(TAUGHT_EASE_MIN, ease * 0.5) if easing
+                    else min(1.0, ease + TAUGHT_EASE_RECOVERY))
             if easing and hold.get("ease", 1.0) == 1.0:
                 self.telemetry.write("voltage_ease", pose=hold["pose"], voltage=low_voltage,
                                      snapshot=snapshot)
