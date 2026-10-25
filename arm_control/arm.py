@@ -792,15 +792,21 @@ class Arm:
                 pose in ("home", "dance") and self._on_upright_corridor(start_ticks)
             )
             staged = pose == "home" and needs_staged_home(start_ticks, target)
+            # Plan from the measured pose nudged inside the envelope. A joint
+            # resting a tick past its limit (elbow 3066 after Home at 3065) is
+            # already accepted by the measured-pose check above, but a path
+            # starting there failed validation and refused Lift this.
+            plan_start = tuple(max(lo, min(hi, tick)) for tick, lo, hi
+                               in zip(start_ticks, envelope.lower, envelope.upper))
             if taught:
                 trajectory = []
                 vmax, amax = taught_limits(self.taught_speed[pose])
-                for begin, end in taught_segments(start_ticks, self.taught[pose],
+                for begin, end in taught_segments(plan_start, self.taught[pose],
                                                   carrying_move=pose in TAUGHT_CARRYING):
                     trajectory += quintic_segment(begin, end, vmax, amax, EXTEND_FPS)
             elif staged:
                 trajectory = []
-                for begin, end in staged_segments(start_ticks, target, HOME_ORDER):
+                for begin, end in staged_segments(plan_start, target, HOME_ORDER):
                     trajectory += quintic_segment(begin, end, TAUGHT_VMAX, TAUGHT_AMAX, EXTEND_FPS)
             elif coordinated:
                 trajectory = quintic_segment(start_ticks, target, EXTEND_VMAX, EXTEND_AMAX, EXTEND_FPS)

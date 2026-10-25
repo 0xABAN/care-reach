@@ -1119,6 +1119,17 @@ class TaughtMoveTests(DashboardBase):
         self.assertLess(bus.positions["elbow_flex"], self.HOME[2] - 10)  # It is moving.
         arm.pose_stop()
 
+    def test_lift_this_starts_when_a_joint_rests_a_tick_past_its_limit(self):
+        bus = TrackingBus(self.HOME)
+        arm = self.taught_arm(bus)
+        self.teach(arm, bus, "lift_this", [self.offset(0, 300, -500, 0, 0, 150)])
+        upper = arm._fold_envelope(arm.bounds).upper[2]
+        bus.positions["elbow_flex"] = upper + 1  # Settled one tick past the limit.
+        bus.goals = bus.positions.copy()
+        arm.pose_start("lift_this")
+        self.run_steps(arm)
+        self.assertIsNone(arm.error)
+
     def test_stop_cancels_taught_move_and_holds_measured(self):
         bus = TrackingBus(self.HOME)
         arm = self.taught_arm(bus)
