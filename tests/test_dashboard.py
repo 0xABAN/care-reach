@@ -878,7 +878,7 @@ class TaughtMoveTests(DashboardBase):
             self.assertLessEqual(abs(bus.positions[name] - lifted[index]), POSE_TOLERANCE, name)
 
     def test_taught_segments_move_one_motor_at_a_time_everywhere(self):
-        from server import taught_segments
+        from arm_control.arm import taught_segments
         home = self.HOME
         open_ = self.offset(0, 300, -300, 0, 0, 200)
         closed = self.offset(0, 300, -300, 0, 0, -300)
