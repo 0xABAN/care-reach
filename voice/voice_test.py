@@ -368,6 +368,26 @@ class VoiceTest:
             def do_POST(self) -> None:
                 if not self.trusted_request():
                     return
+                if self.path == "/text" and hasattr(app, "submit_text"):
+                    if self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/json":
+                        self.respond(400, b'{"error":"Expected JSON"}', "application/json")
+                        return
+                    try:
+                        length = int(self.headers.get("Content-Length", "0"))
+                        if not 0 < length <= 1024:
+                            raise ValueError("Invalid request size")
+                        data = json.loads(self.rfile.read(length))
+                        if not isinstance(data, dict) or set(data) != {"text"}:
+                            raise ValueError("Expected text")
+                        result = app.submit_text(data["text"])
+                    except (ValueError, TypeError, UnicodeDecodeError):
+                        self.respond(400, b'{"error":"Invalid text request"}', "application/json")
+                        return
+                    except RuntimeError:
+                        self.respond(503, b'{"error":"Jev unavailable"}', "application/json")
+                        return
+                    self.respond(200, json.dumps(result).encode(), "application/json")
+                    return
                 if self.path == "/listen":
                     length = min(int(self.headers.get("Content-Length", "0")), 1000)
                     try:
