@@ -21,7 +21,7 @@ _TIMING_FIELDS = ("bus_read_ms", "bus_write_ms", "compute_ms", "cycle_ms")
 
 
 def build_motors() -> dict[str, Any]:
-    """The six SO-101 motors in bus order; the gripper is normalized 0..100."""
+    """The six SO-101 motors in servo ID order; the gripper is normalized 0..100."""
     from lerobot.motors import Motor, MotorNormMode
 
     return {

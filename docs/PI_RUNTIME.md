@@ -1,6 +1,6 @@
 # Headless Pi motor runtime
 
-The tested robot host is a Raspberry Pi 5 with 8 GB RAM, Raspberry Pi OS, Python 3.13, and login `robot@pi.local`. The single care-reach Git checkout is `~/worktrees/care-reach/pi-runtime` on branch `lance/robot-pi`. The URT-2 appears at `/dev/ttyACM0`; use its stable `/dev/serial/by-id/usb-1a86_USB_Single_Serial_5B79078563-if00` path in service and motion commands.
+The tested robot host is a Raspberry Pi 5 with 8 GB RAM, Raspberry Pi OS, Python 3.13, and login `robot@pi.local`. The single care-reach Git checkout is `~/worktrees/care-reach/pi-runtime` on branch `lance/robot-pi`. The URT-2 appears at `/dev/ttyACM0`; use its stable `/dev/serial/by-id/usb-1a86_USB_Single_Serial_5B79078563-if00` path in service and motion commands. Motors 1→2 connect through one URT-2 connector, and motors 3→4→5→6 through another. A read-only diagnostic on 2026-10-24 received responses from IDs 1–6 through that one serial port. The software selects motors by ID, so the cable split does not change its port or motor mapping.
 
 ## Pinned motor dependency
 

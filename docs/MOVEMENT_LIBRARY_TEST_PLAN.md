@@ -18,7 +18,7 @@ curl -fsS http://127.0.0.1:8765/api/state
 curl -fsS http://127.0.0.1:8765/api/diagnostics
 ```
 
-Save the returned state and note all six motor IDs, measured and goal ticks, torque state, operating mode, voltage, and status. Pass only if IDs 1 through 6 respond, positions are plausible for the visible pose, the motors expected to hold are torque-enabled, and there are no active faults or low-voltage readings. Stop here if a read fails or the reported pose disagrees with the arm in front of you.
+Save the returned state and note all six motor IDs, measured and goal ticks, torque state, operating mode, voltage, and status. Confirm that IDs 1–2 on one URT-2 branch and IDs 3–6 on the other all respond through the same serial port. Pass only if all six respond, positions are plausible for the visible pose, the motors expected to hold are torque-enabled, and there are no active faults or low-voltage readings. Stop here if a read fails or the reported pose disagrees with the arm in front of you.
 
 ## 3. First live movements
 
