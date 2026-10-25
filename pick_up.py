@@ -66,12 +66,10 @@ def look(args: argparse.Namespace, config: PickConfig, camera: WristCamera, dete
 
 def execute(args: argparse.Namespace, config: PickConfig, camera: WristCamera, detector: Detector) -> int:
     # Hardware imports stay below the offline checks.
-    from arm_runtime import require_free_port
     from pick.arm import PickArm
     from pick.center import CenterResult, center_over
     from pick.routine import PickResult, pick_up
 
-    require_free_port(args.port)
     arm = PickArm.from_files(args.port)
     if args.center_only:
         arm.move_to(config.survey_pose)

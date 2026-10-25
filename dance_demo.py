@@ -138,6 +138,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     # choreography itself retains the ordinary software envelope.
     from measured_pose_runner import MeasuredPoseRunner
     from arm_runtime import ArmRuntime
+    from arm_control.bus import format_timing_summary
 
     transition_bounds = home_bounds(bounds, RECORDED_HOME)
     MeasuredPoseRunner(args.port, transition_bounds).move(HOME, max_lead=80,
@@ -150,6 +151,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"executed {result['frames_commanded']} frames in "
         f"{result['elapsed_s']:.1f}s; final {result['final_positions']}"
     )
+    print(format_timing_summary(result.get("timing")))
     return 0
 
 

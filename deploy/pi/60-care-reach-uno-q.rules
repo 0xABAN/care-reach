@@ -1,0 +1,2 @@
+# Grant the trusted robot account's plugdev group access only to UNO Q USB devices.
+SUBSYSTEM=="usb", ATTR{idVendor}=="2341", ATTR{idProduct}=="0078", GROUP="plugdev", MODE="0660"

@@ -6,8 +6,10 @@ import argparse
 import os
 from pathlib import Path
 
-from arm_runtime import URT2_PORT, ArmSafetyError
-from measured_pose_runner import PoseMoveError
+from arm_control.bus import URT2_PORT
+from arm_control.bus_lock import BusBusyError
+from arm_control.pose_runner import PoseMoveError
+from arm_control.runtime import ArmSafetyError
 from pick.camera import CAMERA_SERVICE_URL
 from pick.config import CONFIG_PATH
 from pick.detector import AmbiguousDetection, Detector
@@ -17,10 +19,11 @@ DETECTOR_URL_ENV = "CARE_REACH_DETECTOR_URL"
 DETECTOR_TOKEN_ENV = "CARE_REACH_DETECTOR_TOKEN"
 
 # Expected ways a pick stops early: a safety guard, an unsafe or unsolvable
-# move (ValueError, including IKError), an unclear picture, or an unreachable
-# camera or detector (OSError). The movers hold the measured pose with torque
-# on before raising.
-STOP_ERRORS = (ArmSafetyError, PoseMoveError, AmbiguousDetection, ValueError, OSError)
+# move (ValueError, including IKError), another program such as the dashboard
+# owning the servo bus, an unclear picture, or an unreachable camera or
+# detector (OSError). The movers hold the measured pose with torque on before
+# raising.
+STOP_ERRORS = (ArmSafetyError, PoseMoveError, BusBusyError, AmbiguousDetection, ValueError, OSError)
 
 
 def add_pick_options(parser: argparse.ArgumentParser) -> None:

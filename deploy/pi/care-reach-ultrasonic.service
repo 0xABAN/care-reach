@@ -1,0 +1,13 @@
+[Unit]
+Description=Care Reach USB ultrasonic ranger
+After=default.target
+
+[Service]
+Type=simple
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 @REPO@/ultrasonic/reader.py --port 8767
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target

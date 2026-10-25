@@ -1,13 +1,16 @@
 """Fake-bus dashboard checks. These tests never open a serial device."""
 
+import http.client
 import io
 import json
 import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
+from http.server import ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
@@ -101,7 +104,7 @@ class DashboardBase(unittest.TestCase):
         self.pose_path.write_text(json.dumps(pose), encoding="utf-8")
 
     def arm(self, bus):
-        thread_patch = patch("server.threading.Thread")
+        thread_patch = patch("arm_control.arm.threading.Thread")
         thread_patch.start()
         self.addCleanup(thread_patch.stop)
         arm = Arm("fake", bus_factory=lambda _: bus, settings_path=self.settings_path,
@@ -654,6 +657,194 @@ class TrackingBus(FakeBus):
                 self.positions[name] += max(-8, min(8, distance))
 
 
+class BlockedGripBus(TrackingBus):
+    """The gripper stops on an object at ``floor`` ticks."""
+
+    def __init__(self, positions, floor):
+        super().__init__(positions)
+        self.floor = floor
+
+    def sync_write(self, register, values, normalize=True):
+        super().sync_write(register, values, normalize)
+        self.positions["gripper"] = max(self.positions["gripper"], self.floor)
+
+
+class WeakShoulderBus(TrackingBus):
+    """Under load the shoulder needs a 50-tick lead to lift and sags 45 ticks."""
+
+    def __init__(self, positions, lifted):
+        super().__init__(positions)
+        self.lifted = lifted
+
+    def sync_write(self, register, values, normalize=True):
+        before = self.positions["shoulder_lift"]
+        super().sync_write(register, values, normalize)
+        if register != "Goal_Position":
+            return
+        lifting = values["shoulder_lift"] < before
+        if lifting and before - values["shoulder_lift"] < 50:
+            self.positions["shoulder_lift"] = before
+        self.positions["shoulder_lift"] = max(self.positions["shoulder_lift"], self.lifted + 45)
+
+
+class TaughtMoveTests(DashboardBase):
+    HOME = home_target()
+
+    def taught_arm(self, bus):
+        thread_patch = patch("server.threading.Thread")
+        thread_patch.start()
+        self.addCleanup(thread_patch.stop)
+        self.taught_path = self.settings_path.parent / "taught_moves.json"
+        arm = Arm("fake", bus_factory=lambda _: bus, settings_path=self.settings_path,
+                  calibration_path=self.calibration_path, pose_path=self.pose_path,
+                  telemetry_path=self.settings_path.parent / "telemetry.jsonl",
+                  taught_path=self.taught_path)
+        self.addCleanup(arm.close)
+        return arm
+
+    def offset(self, *deltas):
+        return tuple(tick + delta for tick, delta in zip(self.HOME, deltas, strict=True))
+
+    def teach(self, arm, bus, move, steps):
+        for step in steps:
+            bus.positions.update(zip(JOINT_NAMES, step, strict=True))
+            arm.teach_add(move)
+        bus.positions.update(zip(JOINT_NAMES, self.HOME, strict=True))
+        bus.goals = bus.positions.copy()
+
+    def run_pose(self, arm, seconds=60.0):
+        start = time.monotonic()
+        for index in range(1, int(seconds / 0.05) + 1):
+            if arm.hold is None:
+                return True
+            arm._advance(start + index * 0.05)
+        return arm.hold is None
+
+    def test_teach_saves_measured_steps_and_reloads(self):
+        bus = FakeBus(self.HOME)
+        arm = self.taught_arm(bus)
+        step = self.offset(40, 60, -60, 30, 0, 0)
+        self.teach(arm, bus, "press_button", [step])
+        self.assertEqual(arm.state()["taught_moves"], {"press_button": 1, "lift_this": 0})
+        saved = json.loads(self.taught_path.read_text())
+        self.assertEqual(saved["press_button"], [list(step)])
+        self.assertEqual(bus.writes, [])  # Teaching never moves the arm.
+        arm.teach_clear("press_button")
+        self.assertEqual(arm.state()["taught_moves"]["press_button"], 0)
+
+    def test_untaught_or_unknown_move_is_refused(self):
+        arm = self.taught_arm(FakeBus(self.HOME))
+        with self.assertRaisesRegex(ValueError, "teach it first"):
+            arm.pose_start("lift_this")
+        with self.assertRaisesRegex(ValueError, "move must be"):
+            arm.teach_add("wave")
+        self.assertIsNone(arm.hold)
+
+    def test_press_button_plays_steps_and_returns(self):
+        bus = TrackingBus(self.HOME)
+        arm = self.taught_arm(bus)
+        above = self.offset(120, 150, -150, 60, 0, 0)
+        press = self.offset(120, 190, -150, 100, 0, 0)
+        self.teach(arm, bus, "press_button", [above, press, above, self.HOME])
+        arm.pose_start("press_button")
+        self.assertEqual(arm.state()["pose"]["name"], "press_button")
+        deepest = 0
+        for _ in range(4000):
+            if arm.hold is None:
+                break
+            arm._advance(time.monotonic() + _ * 0.05)
+            deepest = max(deepest, bus.positions["shoulder_lift"])
+        self.assertIsNone(arm.hold)
+        self.assertGreaterEqual(deepest, press[1] - POSE_TOLERANCE)
+        self.assertLessEqual(max(bus.leads), 55)
+        for index, name in enumerate(JOINT_NAMES):
+            self.assertEqual(bus.goals[name], self.HOME[index])
+        self.assertTrue(all(value == 1 for value in bus.torque.values()))
+
+    def test_lift_this_grip_stops_on_object_and_keeps_small_squeeze(self):
+        floor = self.HOME[5] - 60
+        bus = BlockedGripBus(self.HOME, floor)
+        arm = self.taught_arm(bus)
+        open_ = self.offset(0, 120, -120, 40, 0, 200)
+        closed = self.offset(0, 120, -120, 40, 0, -300)
+        lifted = self.offset(0, 40, -40, 0, 0, -300)
+        # Teach with a free gripper, then replay with the object in the jaws.
+        free = TrackingBus(self.HOME)
+        teacher = self.taught_arm(free)
+        self.teach(teacher, free, "lift_this", [open_, closed, lifted])
+        arm.taught = teacher.taught
+        arm.pose_start("lift_this")
+        self.assertTrue(self.run_pose(arm), "lift move did not finish")
+        self.assertIsNone(arm.error)
+        self.assertEqual(bus.positions["gripper"], floor)
+        self.assertEqual(bus.goals["gripper"], floor - GRIP_HOLD_LEAD)
+        self.assertLessEqual(abs(bus.positions["shoulder_lift"] - lifted[1]), POSE_TOLERANCE)
+
+    def test_loaded_lift_uses_larger_lead_and_settles_short_of_target(self):
+        lowered = self.offset(0, 300, -200, 0, 0, 0)
+        lifted = self.offset(0, 0, -200, 0, 0, 0)
+        free = TrackingBus(self.HOME)
+        teacher = self.taught_arm(free)
+        self.teach(teacher, free, "lift_this", [lowered, lifted])
+        bus = WeakShoulderBus(lowered, lifted[1])
+        arm = self.taught_arm(bus)
+        arm.taught = teacher.taught
+        arm.pose_start("lift_this")
+        self.assertTrue(self.run_pose(arm), "loaded lift did not finish")
+        self.assertIsNone(arm.error)
+        self.assertGreaterEqual(bus.positions["shoulder_lift"], lifted[1] + 45)
+        self.assertLessEqual(bus.positions["shoulder_lift"], lifted[1] + 60)
+
+    def test_taught_leads_are_120_for_shoulder_and_elbow_and_80_elsewhere(self):
+        bus = TrackingBus(self.HOME)
+        arm = self.taught_arm(bus)
+        far = self.offset(400, 500, -500, 400, 400, 400)
+        self.teach(arm, bus, "press_button", [far])
+        before = bus.positions.copy()
+        arm.pose_start("press_button")
+        worst = [0] * 6
+        start = time.monotonic()
+        for step in range(1, 4000):
+            if arm.hold is None:
+                break
+            snapshot = bus.positions.copy()
+            arm._advance(start + step * 0.05)
+            for index, name in enumerate(JOINT_NAMES):
+                worst[index] = max(worst[index], abs(bus.goals[name] - snapshot[name]))
+        self.assertIsNone(arm.hold)
+        self.assertLessEqual(worst[1], 120)
+        self.assertLessEqual(worst[2], 120)
+        for index in (0, 3, 4, 5):
+            self.assertLessEqual(worst[index], 80, JOINT_NAMES[index])
+
+    def test_blocked_joint_far_from_target_still_stalls(self):
+        lowered = self.offset(0, 300, -200, 0, 0, 0)
+        lifted = self.offset(0, 0, -200, 0, 0, 0)
+        free = TrackingBus(self.HOME)
+        teacher = self.taught_arm(free)
+        self.teach(teacher, free, "lift_this", [lowered, lifted])
+        bus = WeakShoulderBus(lowered, lifted[1] + 100)  # Stops 145 ticks short.
+        arm = self.taught_arm(bus)
+        arm.taught = teacher.taught
+        arm.pose_start("lift_this")
+        with self.assertRaisesRegex(RuntimeError, "Motor 2 stalled"):
+            self.run_pose(arm)
+
+    def test_stop_cancels_taught_move_and_holds_measured(self):
+        bus = TrackingBus(self.HOME)
+        arm = self.taught_arm(bus)
+        self.teach(arm, bus, "press_button", [self.offset(150, 150, -150, 60, 0, 0)])
+        arm.pose_start("press_button")
+        start = time.monotonic()
+        for index in range(1, 15):
+            arm._advance(start + index * 0.05)
+        self.assertTrue(arm.state()["pose"]["active"])
+        arm.pose_stop()
+        self.assertIsNone(arm.hold)
+        self.assertEqual(bus.goals, bus.positions)
+        self.assertTrue(all(value == 1 for value in bus.torque.values()))
+
+
 class HttpHostTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
@@ -678,7 +869,7 @@ class HttpHostTests(unittest.TestCase):
         self.settings_path.write_text(json.dumps(settings), encoding="utf-8")
         self.calibration_path.write_text(json.dumps(calibration), encoding="utf-8")
         self.pose_path.write_text(json.dumps(pose), encoding="utf-8")
-        thread_patch = patch("server.threading.Thread")
+        thread_patch = patch("arm_control.arm.threading.Thread")
         thread_patch.start()
         self.addCleanup(thread_patch.stop)
         arm = Arm("fake", bus_factory=lambda _: FakeBus((2000,) * 6), settings_path=self.settings_path,
@@ -763,14 +954,25 @@ class HttpHostTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn("motors", state)
 
-    def test_camera_tab_and_same_origin_stream(self):
+    def test_camera_tab_uses_latest_frame_snapshots_and_stream_stays_available(self):
         page = (Path(__file__).resolve().parents[1] / "static" / "index.html").read_text()
         self.assertIn('id="tab-camera"', page)
         self.assertIn('id="camera-panel"', page)
-        self.assertIn("'/camera/stream'", page)
+        self.assertIn("'/camera/snapshot'", page)
+        self.assertIn('id="camera2-feed"', page)
+        self.assertIn("'/camera2/snapshot'", page)
+        self.assertIn('id="range-card"', page)
+        self.assertIn("CAMERA_MIN_INTERVAL_MS", page)
+        self.assertIn("pollSnapshot", page)
+        self.assertIn("cache: 'no-store'", page)
+        self.assertNotIn("'/camera/stream'", page)
+        self.assertNotIn("'/camera2/stream'", page)
 
         class FakeCamera(io.BytesIO):
             headers = {"Content-Type": "multipart/x-mixed-replace;boundary=frame"}
+
+            def read1(self, size=-1):
+                return self.read(size)
 
         with patch("server.urlopen", return_value=FakeCamera(b"--frame\r\nJPEG\r\n")) as open_camera:
             status, (headers, body) = self.call(
@@ -779,14 +981,85 @@ class HttpHostTests(unittest.TestCase):
             )
         self.assertEqual(status, 200)
         self.assertIn(b"multipart/x-mixed-replace;boundary=frame", headers)
+        self.assertIn(b"Connection: close", headers)
         self.assertEqual(body, b"--frame\r\nJPEG\r\n")
         open_camera.assert_called_once_with("http://127.0.0.1:8766/stream", timeout=5)
+
+    def test_second_camera_stream_and_snapshot_use_separate_service(self):
+        class FakeCamera(io.BytesIO):
+            headers = {"Content-Type": "image/jpeg", "Content-Length": "4"}
+
+            def read1(self, size=-1):
+                return self.read(size)
+
+        for suffix in ("stream", "snapshot"):
+            with self.subTest(suffix=suffix), patch(
+                "server.urlopen", return_value=FakeCamera(b"JPEG")
+            ) as open_camera:
+                status, (headers, body) = self.call(
+                    self.handler, {"Host": "pi.local:8765"},
+                    path=f"/camera2/{suffix}", parse_json=False,
+                )
+                self.assertEqual(status, 200)
+                self.assertIn(b"image/jpeg", headers)
+                self.assertEqual(body, b"JPEG")
+                open_camera.assert_called_once_with(
+                    f"http://127.0.0.1:8768/{suffix}", timeout=5
+                )
+
+        with patch("server.urlopen", side_effect=OSError("second camera offline")):
+            status, payload = self.call(
+                self.handler, {"Host": "pi.local:8765"}, path="/camera2/stream"
+            )
+        self.assertEqual((status, payload), (503, {"error": "Camera unavailable"}))
+
+    def test_snapshot_content_length_is_computed_when_upstream_omits_it(self):
+        class HeaderlessCamera(io.BytesIO):
+            headers = {"Content-Type": "image/jpeg"}
+
+        with patch("server.urlopen", return_value=HeaderlessCamera(b"jpeg-body")) as open_camera:
+            status, (headers, body) = self.call(
+                self.handler, {"Host": "pi.local:8765"},
+                path="/camera/snapshot", parse_json=False,
+            )
+        self.assertEqual(status, 200)
+        self.assertIn(b"Content-Length: 9", headers)
+        self.assertNotIn(b"Connection: close", headers)
+        self.assertEqual(body, b"jpeg-body")
+        open_camera.assert_called_once_with("http://127.0.0.1:8766/snapshot", timeout=5)
 
     def test_camera_unavailable_returns_503(self):
         with patch("server.urlopen", side_effect=OSError("camera offline")):
             status, payload = self.call(self.handler, {"Host": "pi.local:8765"}, path="/camera/stream")
         self.assertEqual(status, 503)
         self.assertEqual(payload, {"error": "Camera unavailable"})
+
+    def test_ultrasonic_readout_is_independent_and_sanitized(self):
+        page = (Path(__file__).resolve().parents[1] / "static" / "index.html").read_text()
+        self.assertIn('id="range-card"', page)
+        self.assertIn("'/api/ultrasonic'", page)
+        self.assertIn("setInterval(refreshRange, 200)", page)
+
+        sample = {"status": "ok", "distance_cm": 42.25, "sample_age_ms": 80,
+                  "updated_at": "2026-10-24T22:00:00Z", "private": "do not proxy"}
+        with patch("server.urlopen", return_value=io.BytesIO(json.dumps(sample).encode())) as request:
+            status, state = self.call(self.handler, {"Host": "pi.local:8765"},
+                                      path="/api/ultrasonic")
+        self.assertEqual((status, state), (200, {"status": "ok", "distance_cm": 42.25,
+                                                 "sample_age_ms": 80,
+                                                 "updated_at": "2026-10-24T22:00:00Z"}))
+        request.assert_called_once_with("http://127.0.0.1:8767/state", timeout=1)
+
+        with patch("server.urlopen", side_effect=OSError("sensor offline")):
+            status, state = self.call(self.handler, {"Host": "pi.local:8765"},
+                                      path="/api/ultrasonic")
+        self.assertEqual((status, state), (503, {"error": "Ultrasonic service unavailable"}))
+
+        with patch("server.urlopen", return_value=io.BytesIO(
+                b'{"status":"ok","distance_cm":NaN,"sample_age_ms":80}')):
+            status, state = self.call(self.handler, {"Host": "pi.local:8765"},
+                                      path="/api/ultrasonic")
+        self.assertEqual(status, 503)
 
     def test_accepts_pi_local_pi_and_loopback_hosts(self):
         for host in ("pi.local:8765", "pi:8765", "localhost:8765", "127.0.0.1:8765"):
@@ -903,6 +1176,121 @@ class HttpHostTests(unittest.TestCase):
         )
         self.assertEqual(status, 404)
         self.assertEqual(payload, {"error": "Not found"})
+
+
+class HttpKeepAliveTests(unittest.TestCase):
+    """Real-socket checks: HTTP/1.1 keep-alive reuses one connection for
+    finite responses, and stream framing stays accurate and close-delimited."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        ranges = [(1096, 2617), (883, 3243), (861, 3007), (843, 3130), (0, 4095), (1317, 2762)]
+        calibration = {
+            name: {"range_min": lo, "range_max": hi}
+            for name, (lo, hi) in zip(JOINT_NAMES, ranges, strict=True)
+        }
+        settings = {
+            str(index): {"lower": lo, "upper": hi, "scale": 1}
+            for index, (lo, hi) in enumerate(
+                ((1116, 2597), (903, 3223), (881, 2987), (863, 3110), (None, None), (1317, 2742)), 1
+            )
+        }
+        pose = {"robot_id": "care_reach_follower",
+                "positions_ticks": dict(zip(JOINT_NAMES, (2040, 893, 3064, 2888, 2416, 1470), strict=True))}
+        settings_path = root / "joint_settings.json"
+        calibration_path = root / "calibration.json"
+        pose_path = root / "folded_pose.json"
+        settings_path.write_text(json.dumps(settings), encoding="utf-8")
+        calibration_path.write_text(json.dumps(calibration), encoding="utf-8")
+        pose_path.write_text(json.dumps(pose), encoding="utf-8")
+        self.arm = Arm("fake", bus_factory=lambda _: FakeBus((2000,) * 6),
+                       settings_path=settings_path, calibration_path=calibration_path,
+                       pose_path=pose_path, telemetry_path=root / "telemetry.jsonl")
+        self.addCleanup(self.arm.close)
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), handler_for(self.arm, 0))
+        self.server.RequestHandlerClass = handler_for(self.arm, self.server.server_address[1])
+        self.server.daemon_threads = True
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.addCleanup(self.server.shutdown)
+        self.addCleanup(self.server.server_close)
+
+    def connect(self):
+        connection = http.client.HTTPConnection(
+            "127.0.0.1", self.server.server_address[1], timeout=5
+        )
+        self.addCleanup(connection.close)
+        return connection
+
+    def test_keepalive_serves_consecutive_api_and_snapshot_requests(self):
+        connection = self.connect()
+        connection.request("GET", "/api/state")
+        response = connection.getresponse()
+        state = json.loads(response.read())
+        self.assertEqual(response.status, 200)
+        self.assertIn("motors", state)
+        self.assertIsNone(response.getheader("Connection"))
+        shared_socket = connection.sock
+
+        payload = b"fresh-jpeg-bytes"
+
+        class SnapshotCamera(io.BytesIO):
+            headers = {"Content-Type": "image/jpeg"}  # deliberately no Content-Length
+
+        with patch("server.urlopen", return_value=SnapshotCamera(payload)):
+            connection.request("GET", "/camera/snapshot")
+            response = connection.getresponse()
+            body = response.read()
+        self.assertEqual(response.status, 200)
+        self.assertEqual(body, payload)
+        self.assertEqual(response.getheader("Content-Length"), str(len(payload)))
+        self.assertIs(connection.sock, shared_socket)
+
+        connection.request("GET", "/api/state")
+        response = connection.getresponse()
+        response.read()
+        self.assertEqual(response.status, 200)
+        self.assertIs(connection.sock, shared_socket)
+
+    def test_stream_is_close_delimited_and_relays_prompt_chunks(self):
+        class FramedCamera:
+            """Only offers read1: read(n) head-of-line buffering must not be used."""
+
+            headers = {"Content-Type": "multipart/x-mixed-replace;boundary=frame"}
+
+            def __init__(self, frames):
+                self.frames = iter(frames)
+                self.sizes = []
+
+            def read1(self, size=-1):
+                self.sizes.append(size)
+                return next(self.frames, b"")
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return None
+
+        frames = [b"--frame\r\n", b"AA", b"\r\n--frame\r\n", b"BBB", b"\r\n"]
+        upstream = FramedCamera(frames)
+        connection = self.connect()
+        with patch("server.urlopen", return_value=upstream):
+            connection.request("GET", "/camera/stream")
+            response = connection.getresponse()
+            body = response.read()
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.getheader("Connection"), "close")
+        self.assertTrue(response.will_close)
+        self.assertEqual(body, b"".join(frames))
+        self.assertEqual(upstream.sizes, [16 * 1024] * (len(frames) + 1))
 
 
 class StaticUiTests(unittest.TestCase):

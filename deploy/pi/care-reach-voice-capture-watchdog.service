@@ -1,0 +1,6 @@
+[Unit]
+Description=Check Care Reach voice USB capture
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /home/robot/worktrees/care-reach/voice-runtime/deploy/pi/voice-capture-watchdog.py

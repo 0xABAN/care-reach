@@ -113,10 +113,8 @@ def direction(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None
     config = PickConfig.load(args.config)
 
     # Hardware imports stay below the offline checks.
-    from arm_runtime import require_free_port
     from pick.arm import PickArm
 
-    require_free_port(args.port)
     arm = PickArm.from_files(args.port)
     camera = WristCamera(args.camera)
 

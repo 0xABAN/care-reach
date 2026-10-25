@@ -1,7 +1,8 @@
 """The arm as the pick routine sees it: poses, level nudges, vertical moves, and the gripper.
 
 Each motion runs the measured mover, which owns the servo bus only while the
-arm moves. Stop the dashboard first. Torque stays on throughout.
+arm moves; it stops with BusBusyError while the dashboard holds the bus. Stop
+the dashboard first. Torque stays on throughout.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ from typing import Any, Callable
 
 import numpy as np
 
-from measured_pose_runner import MeasuredPoseRunner
+from arm_control.pose_runner import MeasuredPoseRunner
 from motion_core import CALIBRATION_PATH, JOINT_NAMES, SafetyBounds
 from so101_ik import URDF_PATH, SO101Kinematics
 

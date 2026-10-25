@@ -28,7 +28,15 @@
     .release:hover { background: #88373d; }
     .transcription { background: #263841; border-color: #6f93c0; font-weight: 700; white-space: nowrap; }
     .transcription[aria-checked="true"] { background: #197f86; border-color: #7ed7dc; }
+    .mode-control { display: grid; gap: 3px; color: #aebec7; font-size: .8rem; font-weight: 700; }
+    .mode-control select { min-height: 41px; padding: 7px 9px; border: 1px solid #6f93c0; border-radius: 9px; background: #263841; color: #f2f7f9; font: inherit; }
+    .mode-control select:disabled { opacity: .45; }
+    .movement-mode-note { margin: -8px 0 16px; font-size: .9rem; }
     .voice-status { margin: -8px 0 16px; font-size: .9rem; }
+    .teach { margin: 0 0 16px; padding: 12px 14px; border: 1px solid #33454f; border-radius: 12px; background: #1c2a32; }
+    .teach summary { cursor: pointer; font-weight: 700; }
+    .teach-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-top: 10px; }
+    .teach-row .name { min-width: 130px; }
     .grid { display: grid; gap: 12px; }
     .joint { background: #1c2a32; border: 1px solid #33454f; border-radius: 14px; padding: 17px; display: grid; grid-template-columns: minmax(155px,1.2fr) minmax(215px,1.5fr) minmax(180px,1fr) minmax(245px,1.5fr); gap: 16px; align-items: center; }
     .joint.moving { border-color: #7ed7dc; box-shadow: inset 0 0 0 1px #7ed7dc; }
@@ -51,11 +59,23 @@
     [hidden] { display: none !important; }
     .tabs { display: flex; gap: 8px; margin-bottom: 20px; border-bottom: 1px solid #33454f; padding-bottom: 10px; }
     .tabs button[aria-selected="true"] { background: #197f86; border-color: #7ed7dc; font-weight: 700; }
-    .camera-view { display: block; width: 100%; max-width: 960px; height: auto; margin-top: 14px; background: #1c2a32; border: 1px solid #33454f; border-radius: 14px; }
+    .camera-layout { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: 14px; margin-top: 14px; }
+    .camera-card { min-width: 0; }
+    .camera-card h2 { font-size: 1rem; margin: 0 0 8px; }
+    .camera-view { display: block; width: 100%; height: auto; background: #1c2a32; border: 1px solid #33454f; border-radius: 14px; }
+    .camera-error { margin: 8px 0 0; }
+    .range-card { min-height: 185px; padding: 19px; background: #1c2a32; border: 1px solid #33454f; border-radius: 14px; }
+    .camera-layout .range-card { grid-column: 1 / -1; }
+    .range-card[data-state="ok"] { border-color: #559aa0; }
+    .range-card[data-state="stale"], .range-card[data-state="error"] { border-color: #bf6268; }
+    .range-value { margin: 10px 0 6px; font-size: clamp(2.5rem, 5vw, 4rem); font-weight: 750; letter-spacing: -.045em; line-height: 1; font-variant-numeric: tabular-nums; }
+    .range-unit { font-size: 1.25rem; color: #aebec7; font-weight: 500; letter-spacing: 0; }
+    .range-note { margin: 0; color: #aebec7; }
     .history { margin: 16px 0; color: #aebec7; }
     .history summary { cursor: pointer; }
     .history ul { margin: 8px 0; padding-left: 22px; }
     @media (max-width: 1000px) { .joint { grid-template-columns: 1fr 1fr; } }
+    @media (max-width: 700px) { .camera-layout { grid-template-columns: 1fr; } }
     @media (max-width: 600px) { body { padding: 14px; } .top { flex-direction: column; } .top-actions { width: 100%; } .top-actions button { flex: 1; white-space: normal; } .joint { grid-template-columns: 1fr; } }
   </style>
 </head>
@@ -68,43 +88,191 @@
     <section id="controls-panel" role="tabpanel" aria-labelledby="tab-controls">
     <div class="top">
       <div><h1>SO-101 Joint Control</h1><p class="subtitle muted">Hold a direction to move any joint. Release to hold its measured position.</p><p class="subtitle muted" id="extended-pose"></p></div>
-      <div class="top-actions"><button class="transcription" id="transcription-toggle" role="switch" aria-checked="false" disabled>Transcription: checking…</button><button class="pose" id="pose-home">Home / Retract</button><button class="pose" id="pose-extend">Extend</button><button class="pose" id="pose-dance">Dance</button><button class="hold-all" id="hold-all">Hold all joints</button><button class="release" id="release" disabled title="Torque release is unavailable">Torque release unavailable</button></div>
+      <div class="top-actions"><button class="transcription" id="transcription-toggle" role="switch" aria-checked="false" disabled>Transcription: checking…</button><label class="mode-control" for="movement-mode">Movement mode<select id="movement-mode" aria-describedby="movement-mode-note" disabled><option value="coordinated">Coordinated</option><option value="shoulder_isolated">Motor 2 isolated</option><option value="single_joint">Single joint</option></select></label><button class="pose" id="pose-home">Home / Retract</button><button class="pose" id="pose-extend">Extend</button><button class="pose" id="pose-dance">Dance</button><button class="pose" id="pose-press_button">Press button</button><button class="pose" id="pose-lift_this">Lift this</button><button class="hold-all" id="hold-all">Hold all joints</button><button class="release" id="release" disabled title="Torque release is unavailable">Torque release unavailable</button></div>
     </div>
     <p id="voice-status" class="voice-status muted" role="status">Checking voice service…</p>
+    <p id="movement-mode-note" class="movement-mode-note muted">Coordinated mode runs group moves. Motor 2 isolated lets the other joints move together, or motor 2 move alone. Saved moves are available only when their whole path fits that rule; Home, Extend, and Dance need coordinated mode. Single joint mode allows one joint at a time. You can save taught steps while the arm is idle in any mode. The servos stay powered to hold position, and motor 2 can still have a voltage dip when it moves alone.</p>
     <div id="status" class="status">Connecting to the arm…</div>
+    <details class="teach" id="teach">
+      <summary>Teach moves</summary>
+      <p class="muted">Jog the arm to each position in order, then press Save. Playback moves smoothly through the saved steps. For Lift this, save an open-gripper step above the object, one lowered around it, one with the gripper closed, then one lifted. The gripper may stop on the object; that counts as a grip.</p>
+      <div class="teach-row" data-move="press_button"><span class="name">Press button</span><span class="muted steps">0 steps</span><button class="save">Save current position</button><button class="clear">Clear</button></div>
+      <div class="teach-row" data-move="lift_this"><span class="name">Lift this</span><span class="muted steps">0 steps</span><button class="save">Save current position</button><button class="clear">Clear</button></div>
+    </details>
     <details class="history"><summary>Recent power and servo events</summary><ul id="fault-history"><li>Loading…</li></ul></details>
     <div id="joints" class="grid"></div>
     <p class="hint muted">Forward increases encoder ticks. Saved joint limits are shown read-only; hold speed is 1×, 2×, 4×, or 8×. Closing the gripper keeps a bounded inward hold when released. Home is the retracted pose; Extend is the camera-safe upright pose. Dance homes first and returns Home. Press an active pose button again to cancel. Torque remains on when a hold ends or this panel closes.</p>
     </section>
     <section id="camera-panel" role="tabpanel" aria-labelledby="tab-camera" hidden>
-      <h1>Live camera</h1>
-      <p class="subtitle muted">Feed from the USB camera connected to the Pi.</p>
-      <img id="camera-feed" class="camera-view" alt="Live view from the Pi camera">
-      <p id="camera-error" class="muted" hidden>Camera feed unavailable. Check the camera service on the Pi.</p>
+      <h1>Live sensors</h1>
+      <p class="subtitle muted">Both USB cameras and the ultrasonic distance sensor connected to the Pi.</p>
+      <div class="camera-layout">
+        <section class="camera-card" aria-labelledby="camera-heading">
+          <h2 id="camera-heading">Camera 1</h2>
+          <img id="camera-feed" class="camera-view" alt="Live view from Camera 1">
+          <p id="camera-error" class="camera-error muted" role="status" hidden>Camera 1 feed unavailable. Check its service on the Pi.</p>
+        </section>
+        <section class="camera-card" aria-labelledby="camera2-heading">
+          <h2 id="camera2-heading">Camera 2</h2>
+          <img id="camera2-feed" class="camera-view" alt="Live view from Camera 2">
+          <p id="camera2-error" class="camera-error muted" role="status" hidden>Camera 2 feed unavailable. Check its service on the Pi.</p>
+        </section>
+        <section id="range-card" class="range-card" data-state="waiting" aria-labelledby="range-heading">
+          <div class="group-label" id="range-heading">Ultrasonic distance</div>
+          <div class="range-value"><span id="range-value">—</span><span class="range-unit" id="range-unit"></span></div>
+          <p class="range-note" id="range-note" role="status">Waiting for sensor data…</p>
+        </section>
+      </div>
     </section>
   </main>
   <script>
     const joints = document.getElementById('joints');
     const statusBox = document.getElementById('status');
     const cameraFeed = document.getElementById('camera-feed');
+    const camera2Feed = document.getElementById('camera2-feed');
+    const cameraPanel = document.getElementById('camera-panel');
+    const rangeCard = document.getElementById('range-card');
+    const rangeValue = document.getElementById('range-value');
+    const rangeUnit = document.getElementById('range-unit');
+    const rangeNote = document.getElementById('range-note');
+    let rangeRequest = null;
+
+    function renderRange(state, distance, note) {
+      rangeCard.dataset.state = state;
+      rangeValue.textContent = distance === null ? '—' : distance.toFixed(1);
+      rangeUnit.textContent = distance === null ? '' : ' cm';
+      rangeNote.textContent = note;
+    }
+
+    async function refreshRange() {
+      if (cameraPanel.hidden || document.hidden || rangeRequest) return;
+      const request = new AbortController();
+      rangeRequest = request;
+      try {
+        const response = await fetch('/api/ultrasonic', {cache: 'no-store', signal: request.signal});
+        const reading = await response.json();
+        if (!response.ok) throw new Error(reading.error || 'Sensor unavailable');
+        if (cameraPanel.hidden || document.hidden) return;
+        const fresh = reading.status === 'ok' && Number.isFinite(reading.distance_cm) &&
+          Number.isInteger(reading.sample_age_ms) && reading.sample_age_ms <= 1500;
+        if (fresh) renderRange('ok', reading.distance_cm, `Updated ${Math.max(0, reading.sample_age_ms)} ms ago`);
+        else if (reading.status === 'waiting') renderRange('waiting', null, 'Waiting for Arduino data…');
+        else if (reading.status === 'error') renderRange('error', null, 'Sensor error. Check the Arduino connection.');
+        else renderRange('stale', null, 'No recent distance reading.');
+      } catch (error) {
+        if (error.name !== 'AbortError' && !cameraPanel.hidden && !document.hidden)
+          renderRange('error', null, 'Sensor feed unavailable.');
+      } finally {
+        if (rangeRequest === request) rangeRequest = null;
+      }
+    }
+
+    const CAMERA_MIN_INTERVAL_MS = 200; // 5 fps cap per camera; slow responses push the next poll later instead of queueing
+    const CAMERA_RETRY_BASE_MS = 500;
+    const CAMERA_RETRY_MAX_MS = 4000;
+    const cameraPolls = [
+      { feed: cameraFeed, path: '/camera/snapshot', errorId: 'camera-error' },
+      { feed: camera2Feed, path: '/camera2/snapshot', errorId: 'camera2-error' },
+    ].map(spec => ({
+      ...spec,
+      errorBox: document.getElementById(spec.errorId),
+      url: null,      // object URL of the frame currently shown
+      timer: null,    // pending setTimeout
+      request: null,  // in-flight AbortController
+      running: false,
+      generation: 0,  // bumped on every start/stop to invalidate stale responses
+      delayMs: CAMERA_RETRY_BASE_MS,
+    }));
+
+    function cameraVisible() {
+      return !cameraPanel.hidden && !document.hidden;
+    }
+
+    async function pollSnapshot(camera, generation) {
+      const started = Date.now();
+      const request = new AbortController();
+      camera.request = request;
+      let replaced = false;
+      try {
+        const response = await fetch(camera.path, {cache: 'no-store', signal: request.signal});
+        if (!response.ok) throw new Error(`Camera answered ${response.status}`);
+        const blob = await response.blob();
+        if (generation !== camera.generation || !cameraVisible()) return;
+        const url = URL.createObjectURL(blob);
+        try {
+          await new Promise((resolve, reject) => {
+            const probe = new Image();
+            probe.onload = () => { probe.onload = probe.onerror = null; resolve(); };
+            probe.onerror = () => { probe.onload = probe.onerror = null; reject(new Error('Corrupt JPEG')); };
+            probe.src = url;
+          });
+        } catch (error) {
+          URL.revokeObjectURL(url);
+          throw error;
+        }
+        if (generation !== camera.generation || !cameraVisible()) { URL.revokeObjectURL(url); return; }
+        const previous = camera.url;
+        camera.feed.src = url;
+        camera.url = url;
+        if (previous) URL.revokeObjectURL(previous);
+        camera.errorBox.hidden = true;
+        replaced = true;
+      } catch (error) {
+        if (generation !== camera.generation) return;
+        if (error.name !== 'AbortError') camera.errorBox.hidden = false;
+      } finally {
+        if (camera.request === request) camera.request = null;
+        if (generation !== camera.generation || !camera.running || !cameraVisible()) return;
+        camera.delayMs = replaced ? CAMERA_RETRY_BASE_MS : Math.min(camera.delayMs * 2, CAMERA_RETRY_MAX_MS);
+        const elapsed = Date.now() - started;
+        const delay = replaced ? Math.max(0, CAMERA_MIN_INTERVAL_MS - elapsed) : camera.delayMs;
+        camera.timer = setTimeout(() => pollSnapshot(camera, generation), delay);
+      }
+    }
+
+    function stopCameraPolls() {
+      for (const camera of cameraPolls) {
+        if (!camera.running) continue;
+        camera.running = false;
+        camera.generation += 1;
+        if (camera.timer) { clearTimeout(camera.timer); camera.timer = null; }
+        if (camera.request) { camera.request.abort(); camera.request = null; }
+      }
+    }
+
+    function syncCameraPolls() {
+      if (cameraVisible()) {
+        for (const camera of cameraPolls) {
+          if (camera.running) continue;
+          camera.running = true;
+          camera.generation += 1;
+          camera.delayMs = CAMERA_RETRY_BASE_MS;
+          pollSnapshot(camera, camera.generation);
+        }
+      } else stopCameraPolls();
+    }
+
     function showTab(name) {
       endPress();
       const camera = name === 'camera';
       document.getElementById('controls-panel').hidden = camera;
-      document.getElementById('camera-panel').hidden = !camera;
+      cameraPanel.hidden = !camera;
       document.getElementById('tab-controls').setAttribute('aria-selected', String(!camera));
       document.getElementById('tab-camera').setAttribute('aria-selected', String(camera));
-      document.getElementById('camera-error').hidden = true;
-      if (camera) cameraFeed.src = '/camera/stream';
-      else cameraFeed.removeAttribute('src');
+      syncCameraPolls();
+      if (camera) refreshRange();
+      else if (rangeRequest) rangeRequest.abort();
     }
     document.getElementById('tab-controls').addEventListener('click', () => showTab('controls'));
     document.getElementById('tab-camera').addEventListener('click', () => showTab('camera'));
     cameraFeed.addEventListener('error', () => { document.getElementById('camera-error').hidden = false; });
+    camera2Feed.addEventListener('error', () => { document.getElementById('camera2-error').hidden = false; });
     let press = null;
     let rowsBuilt = false;
     let lastState = null;
     const transcriptionToggle = document.getElementById('transcription-toggle');
+    const movementModeSelect = document.getElementById('movement-mode');
+    let movementModeBusy = false;
     const voiceStatus = document.getElementById('voice-status');
     let transcriptionEnabled = null;
     let transcriptionBusy = false;
@@ -141,6 +309,29 @@
       } catch (error) {
         transcriptionBusy = false;
         renderTranscription(null, error.message);
+      }
+    });
+
+    movementModeSelect.addEventListener('change', async () => {
+      if (movementModeBusy || !lastState) return;
+      if (press || lastState.holding !== null || (lastState.pose && lastState.pose.active)) {
+        movementModeSelect.value = lastState.movement_mode;
+        show('Stop the current movement before changing modes.', true);
+        return;
+      }
+      movementModeBusy = true;
+      movementModeSelect.disabled = true;
+      try {
+        const result = await api('/api/movement/mode', {movement_mode: movementModeSelect.value});
+        await refresh();
+        show(`Movement mode: ${result.movement_mode.replaceAll('_', ' ')}.`);
+      } catch (error) {
+        await refresh();
+        if (lastState) movementModeSelect.value = lastState.movement_mode;
+        show(error.message, true);
+      } finally {
+        movementModeBusy = false;
+        if (lastState) movementModeSelect.disabled = lastState.holding !== null || Boolean(lastState.pose && lastState.pose.active);
       }
     });
 
@@ -224,6 +415,8 @@
         const state = await response.json();
         if (!response.ok) throw new Error(state.error || 'Could not read arm');
         lastState = state;
+        if (!movementModeBusy) movementModeSelect.value = state.movement_mode || (state.single_motor_mode ? 'single_joint' : 'coordinated');
+        movementModeSelect.disabled = movementModeBusy || state.holding !== null || Boolean(state.pose && state.pose.active);
         const history = document.getElementById('fault-history');
         const events = (state.recent_events || []).filter(event =>
           ['status_changed', 'voltage_threshold_changed', 'motion_error', 'voltage_recovered'].includes(event.event));
@@ -274,20 +467,42 @@
         const homeBtn = document.getElementById('pose-home');
         const extendBtn = document.getElementById('pose-extend');
         const danceBtn = document.getElementById('pose-dance');
-        homeBtn.disabled = !state.pose_enabled || (poseActive && pose.name !== 'home');
-        extendBtn.disabled = !state.pose_enabled || (poseActive && pose.name !== 'extend');
-        danceBtn.disabled = !state.pose_enabled || (poseActive && pose.name !== 'dance');
+        const poseAvailable = name => state.pose_available ? Boolean(state.pose_available[name]) : Boolean(state.pose_enabled);
+        for (const button of document.querySelectorAll('.pose')) {
+          button.title = (state.movement_mode || 'coordinated') !== 'coordinated' && !poseAvailable(button.id.slice(5)) ?
+            'This move needs coordinated mode or a path that keeps motor 2 still' : '';
+        }
+        const poseDisabled = name => poseActive && pose.name === name ? false :
+          !poseAvailable(name) || poseActive;
+        homeBtn.disabled = poseDisabled('home');
+        extendBtn.disabled = poseDisabled('extend');
+        danceBtn.disabled = poseDisabled('dance');
         homeBtn.classList.toggle('active', poseActive && pose.name === 'home');
         extendBtn.classList.toggle('active', poseActive && pose.name === 'extend');
         danceBtn.classList.toggle('active', poseActive && pose.name === 'dance');
+        for (const move of ['press_button', 'lift_this']) {
+          const steps = (state.taught_moves || {})[move] || 0;
+          const button = document.getElementById(`pose-${move}`);
+          button.disabled = !steps || poseDisabled(move);
+          button.classList.toggle('active', poseActive && pose.name === move);
+          const row = document.querySelector(`.teach-row[data-move="${move}"]`);
+          row.querySelector('.steps').textContent = `${steps} step${steps === 1 ? '' : 's'}`;
+          row.querySelector('.save').disabled = poseActive || state.holding !== null || !state.motors.every(m => m.motion_enabled);
+          row.querySelector('.clear').disabled = !steps || (poseActive && pose.name === move);
+        }
         document.getElementById('hold-all').disabled = !state.hold_all_enabled || poseActive;
+        document.getElementById('hold-all').title = (state.movement_mode || 'coordinated') !== 'coordinated' ? 'Select coordinated mode to hold all joints' : '';
         if (state.error) show(state.error, true);
         else if (poseActive) show(`${pose.name === 'dance' ? 'Dancing' : `Moving to ${pose.name}`} · ${Math.round(pose.progress * 100)}% · press ${pose.name} again to cancel`);
         else if (faulted.length) show(`Motor${faulted.length > 1 ? 's' : ''} ${faulted.join(', ')} faulted · healthy joints can still jog; group poses are paused.`, true);
         else if (state.holding === 6 && !press) show('Motor 6 moving to target');
-        else if (!press) show(state.motion_enabled ? 'Joints ready · release a direction to hold position' : 'Torque is off · use Hold all joints to enable movement');
+        else if (!press) show(state.motion_enabled ?
+          (state.movement_mode === 'single_joint' ? 'Single joint mode · jog one joint at a time' :
+           state.movement_mode === 'shoulder_isolated' ? 'Motor 2 isolated · it moves alone while other joints can move together' :
+           'Joints ready · release a direction to hold position') :
+          (state.movement_mode !== 'coordinated' ? 'Torque is off · select coordinated mode before using Hold all joints' : 'Torque is off · use Hold all joints to enable movement'));
         else show(`Moving motor ${press.motor} · release to stop`);
-      } catch (error) { show(error.message, true); endPress(); }
+      } catch (error) { movementModeSelect.disabled = true; show(error.message, true); endPress(); }
     }
     async function togglePose(name) {
       endPress();
@@ -301,6 +516,20 @@
     document.getElementById('pose-home').addEventListener('click', () => togglePose('home'));
     document.getElementById('pose-extend').addEventListener('click', () => togglePose('extend'));
     document.getElementById('pose-dance').addEventListener('click', () => togglePose('dance'));
+    for (const move of ['press_button', 'lift_this']) {
+      document.getElementById(`pose-${move}`).addEventListener('click', () => togglePose(move));
+      const row = document.querySelector(`.teach-row[data-move="${move}"]`);
+      row.querySelector('.save').addEventListener('click', async () => {
+        endPress();
+        try { const r = await api('/api/teach/add', {move}); show(`Saved step ${r.steps} of ${move}.`); await refresh(); }
+        catch (error) { show(error.message, true); }
+      });
+      row.querySelector('.clear').addEventListener('click', async () => {
+        if (!confirm(`Clear every saved step of ${move}?`)) return;
+        try { await api('/api/teach/clear', {move}); show(`${move} cleared.`); await refresh(); }
+        catch (error) { show(error.message, true); }
+      });
+    }
     document.getElementById('release').addEventListener('click', async () => {
       endPress();
       try { await api('/api/release', {}); await refresh(); show('All torque released. Support the arm.'); }
@@ -314,10 +543,23 @@
     window.addEventListener('blur', endPress);
     window.addEventListener('pointerup', endPress);
     window.addEventListener('pointercancel', endPress);
-    document.addEventListener('visibilitychange', () => { if (document.hidden) endPress(); });
-    window.addEventListener('pagehide', endPress);
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) { endPress(); if (rangeRequest) rangeRequest.abort(); }
+      else refreshRange();
+      syncCameraPolls();
+    });
+    window.addEventListener('pagehide', (event) => {
+      endPress();
+      stopCameraPolls();
+      if (event.persisted) return; // bfcache restore keeps the shown frame; object URLs survive it
+      for (const camera of cameraPolls) {
+        if (camera.url) { URL.revokeObjectURL(camera.url); camera.url = null; }
+      }
+    });
+    window.addEventListener('pageshow', () => syncCameraPolls());
     refresh(); setInterval(refresh, 1000);
     refreshTranscription(); setInterval(refreshTranscription, 2000);
+    setInterval(refreshRange, 200);
   </script>
 </body>
 </html>

@@ -21,6 +21,8 @@ CRITERIA = {
     "home": "Direct request to retract the arm, bring it back, or move to its saved Home pose.",
     "extend": "Direct request to extend or raise the arm into its upright straight-up pose.",
     "dance": "Direct request for the robot arm to dance, jig, or perform its saved dance.",
+    "lift_this": "Direct request to lift, pick up, or grab the object in front of the robot.",
+    "press_button": "Direct request to press, push, or hit the button.",
     "stop": "Direct request to stop current robot motion immediately.",
     "cancel": "Direct request to cancel a pending robot request or wake window.",
     "none": (

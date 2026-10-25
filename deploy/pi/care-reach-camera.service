@@ -4,7 +4,7 @@ After=default.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/ustreamer --device /dev/v4l/by-id/usb-Innomaker_Innomaker-U20CAM-720P_SN0001-video-index0 --format MJPEG --resolution 1280x720 --desired-fps 30 --host 127.0.0.1 --port 8766 --slowdown
+ExecStart=/usr/bin/ustreamer --device /dev/v4l/by-id/usb-Innomaker_Innomaker-U20CAM-720P_SN0001-video-index0 --format MJPEG --resolution 1280x720 --desired-fps 30 --host 127.0.0.1 --port 8766
 Restart=always
 RestartSec=2
 

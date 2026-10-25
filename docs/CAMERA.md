@@ -20,6 +20,13 @@ from a computer that can reach the Pi. The same tab works through the
 [dashboard's Tailscale SSH tunnel](http://127.0.0.1:8765/) on this Mac. The
 camera is available to everyone with dashboard access.
 
+The dashboard tab shows a low-latency latest-frame feed instead of the MJPEG
+stream: it polls `/camera/snapshot` (and `/camera2/snapshot` for the second
+camera) at most once per camera in flight and at most ~5 fps, keeps the last
+frame on screen until a replacement arrives, and pauses while the tab or page
+is hidden. This avoids queueing stale 30 fps frames over slow tunnels. The
+`/camera/stream` endpoints remain available for direct MJPEG clients.
+
 For a separate camera-only view on a Mac that can SSH to the Pi over Tailscale:
 
 ```bash
@@ -35,3 +42,20 @@ Its position and orientation relative to the arm have not been calibrated.
 [Picking up objects](PICK.md) avoids needing that: with the camera on the
 wrist mount, it looks and nudges until the object sits where the jaws are, and
 a one-time setup records which picture direction is which gripper axis.
+
+## Second USB camera
+
+The `w200` webcam (`0c45:1915`) uses the stable path
+`/dev/v4l/by-id/usb-Sonix_Technology_Co.__Ltd._w200_SN0001-video-index0`.
+It has its own Pi-local `ustreamer` service on port 8768 at 640×480 MJPEG.
+The service starts independently of the first camera and retries after an
+unplug/replug. Install it from this worktree on the Pi with:
+
+```bash
+bash deploy/pi/install-camera-2.sh
+systemctl --user status care-reach-camera-2.service
+```
+
+The regular dashboard relays the second feed at `/camera2/stream` and
+`/camera2/snapshot` alongside the first camera and ultrasonic range display.
+The new camera has not been calibrated into the robot's coordinate frame.

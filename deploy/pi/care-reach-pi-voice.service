@@ -1,0 +1,15 @@
+[Unit]
+Description=Care Reach voice transcription and command service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/robot/worktrees/care-reach/voice-runtime/voice
+EnvironmentFile=/home/robot/.config/care-reach/voice.env
+ExecStart=/home/robot/worktrees/care-reach/voice-runtime/.venv/bin/python -u /home/robot/worktrees/care-reach/voice-runtime/voice/pi_voice.py --device hw:CARD=Device,DEV=0 --port 8770 --stt-mode stream
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

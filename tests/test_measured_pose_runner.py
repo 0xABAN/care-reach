@@ -1,8 +1,11 @@
 """Fake-bus checks only; these tests never open the serial device."""
 
+import tempfile
 import unittest
+from pathlib import Path
 
-from measured_pose_runner import GRIP_HOLD_LEAD, MeasuredPoseRunner, PoseMoveError
+from arm_control.bus_lock import BusLock
+from arm_control.pose_runner import GRIP_HOLD_LEAD, MeasuredPoseRunner, PoseMoveError
 from motion_core import JOINT_NAMES, SafetyBounds, UnsafePoseError
 
 
@@ -219,6 +222,49 @@ class RunnerTests(unittest.TestCase):
             MeasuredPoseRunner("unused", BOUNDS, bus_factory=lambda _: bus, clock=FakeClock()).move(target)
         self.assertEqual(bus.writes[-1]["elbow_flex"], BOUNDS.upper[2])
         self.assertEqual(bus.disconnects, [False])
+
+    def test_result_carries_measured_bus_and_compute_windows(self):
+        bus = FakeBus("unused")
+        result = MeasuredPoseRunner("unused", BOUNDS, bus_factory=lambda _: bus, clock=FakeClock()).move(
+            (2000, 2120, 1880, 2070, 2000, 2000)
+        )
+        timing = result["timing"]
+        for field in ("bus_read_ms", "bus_write_ms", "compute_ms", "cycle_ms"):
+            window = timing[field]
+            self.assertIsInstance(window, dict, field)
+            self.assertGreater(window["count"], 0, field)
+            self.assertLessEqual(window["mean_ms"], window["max_ms"] + 1e-9, field)
+        self.assertLessEqual(timing["compute_ms"]["mean_ms"], timing["cycle_ms"]["mean_ms"] + 1e-9)
+        self.assertEqual(bus.disconnects, [False])
+
+    def test_explicit_lock_is_released_after_a_completed_move(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "arm-bus.lock"
+            lock = BusLock(path)
+            bus = FakeBus("unused")
+            MeasuredPoseRunner("unused", BOUNDS, bus_factory=lambda _: bus, bus_lock=lock,
+                               clock=FakeClock()).move((2000,) * 6)
+            self.assertFalse(lock.locked)
+            next_owner = BusLock(path)
+            next_owner.acquire("next-owner")
+            self.assertTrue(next_owner.locked)
+            next_owner.release()
+
+    def test_disconnect_failure_still_releases_lock(self):
+        class DisconnectingBus(FakeBus):
+            def disconnect(self, disable_torque=True):
+                super().disconnect(disable_torque=disable_torque)
+                raise OSError("disconnect failed")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "arm-bus.lock"
+            lock = BusLock(path)
+            bus = DisconnectingBus("unused")
+            with self.assertRaisesRegex(OSError, "disconnect failed"):
+                MeasuredPoseRunner("unused", BOUNDS, bus_factory=lambda _: bus, bus_lock=lock,
+                                   clock=FakeClock()).move((2000,) * 6)
+            self.assertEqual(bus.disconnects, [False])
+            self.assertFalse(lock.locked)
 
 
 if __name__ == "__main__":
