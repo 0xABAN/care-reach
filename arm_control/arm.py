@@ -165,16 +165,16 @@ def staged_segments(begin, end, order):
     return segments
 
 
-# Home from a far-reaching pose folds the elbow, then lifts the shoulder, then
-# the wrist, then the rest. Pulling several loaded joints at once sagged the
-# supply below MIN_VOLTAGE_RAW; one at a time it stays healthy.
+# Home folds the elbow, then lifts the shoulder, then the wrist, then the rest,
+# one at a time from any start. Pulling several loaded joints at once sagged the
+# supply below MIN_VOLTAGE_RAW. Elbow before shoulder also respects the
+# Extend->Home rule that the shoulder must not lead the elbow.
 HOME_ORDER = ((2,), (1,), (3,), (0, 4, 5))
-HOME_STAGE_TICKS = 150
 
 
 def needs_staged_home(start, home):
-    """Whether at least two of the shoulder, elbow, and wrist are far from Home."""
-    return sum(abs(start[index] - home[index]) > HOME_STAGE_TICKS for index in (1, 2, 3)) >= 2
+    """Whether the shoulder, elbow, or wrist has a real distance to travel."""
+    return any(abs(start[index] - home[index]) > POSE_TOLERANCE for index in (1, 2, 3))
 
 
 def find_port():
@@ -783,20 +783,19 @@ class Arm:
             coordinated = pose == "extend" or (
                 pose in ("home", "dance") and self._on_upright_corridor(start_ticks)
             )
-            staged = (pose == "home" and not coordinated
-                      and needs_staged_home(start_ticks, target))
+            staged = pose == "home" and needs_staged_home(start_ticks, target)
             if taught:
                 trajectory = []
                 vmax, amax = taught_limits(self.taught_speed[pose])
                 for begin, end in taught_segments(start_ticks, self.taught[pose],
                                                   carrying_move=pose in TAUGHT_CARRYING):
                     trajectory += quintic_segment(begin, end, vmax, amax, EXTEND_FPS)
-            elif coordinated:
-                trajectory = quintic_segment(start_ticks, target, EXTEND_VMAX, EXTEND_AMAX, EXTEND_FPS)
             elif staged:
                 trajectory = []
                 for begin, end in staged_segments(start_ticks, target, HOME_ORDER):
                     trajectory += quintic_segment(begin, end, TAUGHT_VMAX, TAUGHT_AMAX, EXTEND_FPS)
+            elif coordinated:
+                trajectory = quintic_segment(start_ticks, target, EXTEND_VMAX, EXTEND_AMAX, EXTEND_FPS)
             else:
                 trajectory = None
             if trajectory is not None:
@@ -1348,6 +1347,17 @@ class Arm:
                 hold["progress"] = .05
                 hold["next"] = now + POSE_STEP_SECONDS
                 hold["expires"] = now + 60
+            elif hold.get("staged"):
+                # The joints are near Home. Finish with Home's usual small
+                # trim so it lands as precisely as before.
+                hold["trajectory"] = None
+                hold["staged"] = False
+                hold["start_positions"] = positions
+                hold["progress_position"] = positions.copy()
+                hold["progress_time"] = {name: now for name in JOINT_NAMES}
+                hold["trim_pending"] = set()
+                hold["next"] = now + POSE_STEP_SECONDS
+                hold["expires"] = now + POSE_TIMEOUT_SECONDS
             else:
                 hold["progress"] = 1.0
                 self._complete_pose(snapshot)
