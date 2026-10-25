@@ -4,6 +4,7 @@ import sys
 import time
 import types
 import unittest
+from urllib.error import URLError
 from unittest.mock import patch
 
 from pi_voice import MODEL, PiVoiceTest
@@ -284,6 +285,29 @@ class StreamingDispatchTest(unittest.TestCase):
         self.requests.clear()
         self.final_turn("Hey Arm close the hand")
         self.assertFalse(any(url.endswith("/api/motor6/go") for url, _ in self.requests))
+
+    def test_typed_text_uses_jev_and_works_with_microphone_paused(self):
+        self.app.listening = False
+        with patch("pi_voice.classify_jev", return_value=("open_gripper", 13)) as classify:
+            result = self.app.submit_text("open it")
+        classify.assert_called_once_with("open it", "openrouter-key", MODEL)
+        self.assertEqual(result["decision"], "accepted")
+        self.assertEqual(result["command"], "open_gripper")
+        self.assertEqual(self.app.command_backend, "Jev (typed)")
+        self.assertIn(("http://127.0.0.1:8765/api/motor6/go", {"target": 900}),
+                      self.requests)
+
+    def test_typed_ambiguous_or_unavailable_decision_never_moves(self):
+        with patch("pi_voice.classify_jev", return_value=("dance", 7)):
+            self.assertEqual(self.app.submit_text("should I dance")["decision"], "rejected")
+        self.assertEqual(self.requests, [])
+        with patch("pi_voice.classify_jev", side_effect=URLError("offline")):
+            with self.assertRaisesRegex(RuntimeError, "Jev unavailable"):
+                self.app.submit_text("dance")
+        self.assertEqual(self.requests, [])
+        for invalid in ("", " " * 4, 1, "x" * 501):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                self.app.submit_text(invalid)
 
     def test_pose_busy_or_fault_state(self):
         self.robot_state["pose"]["active"] = True

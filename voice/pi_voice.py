@@ -9,6 +9,7 @@ import os
 import re
 import threading
 import time
+from datetime import datetime
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -180,6 +181,7 @@ class PiVoiceTest(VoiceTest):
         self.ui["stt_mode"] = stt_mode
         self.ui["action"] = ""
         self.toggle_lock = threading.Lock()
+        self.action_lock = threading.Lock()
         self.listening = False
         self.ui["listening"] = False
 
@@ -244,7 +246,46 @@ class PiVoiceTest(VoiceTest):
             return "pick_up_can"
         return "none"
 
+    def submit_text(self, text: str) -> dict:
+        """Send an explicit typed request through Jev, then the normal arm guards."""
+        if type(text) is not str or not 1 <= len(text.strip()) <= 500:
+            raise ValueError("text must contain 1–500 characters")
+        started = time.monotonic()
+        try:
+            command, classifier_ms = classify_jev(text, self.openrouter_key, self.openrouter_model)
+        except (HTTPError, URLError, TimeoutError, ValueError, KeyError, IndexError,
+                TypeError, json.JSONDecodeError, RuntimeError) as exc:
+            self.print(f"[typed] Jev decision failed ({type(exc).__name__}); no motion sent.")
+            raise RuntimeError("Jev unavailable") from exc
+        if command not in COMMANDS:
+            raise RuntimeError("Jev returned an unsupported command")
+        accepted = command != "none" and (command not in MOTION_COMMANDS | {"stop", "cancel"}
+                                           or grounded_request(text, command))
+        self.command_backend = "Jev (typed)"
+        self.command_latency_ms = classifier_ms
+        self.dashboard_api_ms = 0
+        action = self.execute_command(command) if accepted else ""
+        elapsed_ms = round((time.monotonic() - started) * 1000)
+        decision = "accepted" if accepted else "rejected"
+        with self.ui_lock:
+            self.ui.update(decision=decision, command=command if accepted else "",
+                           action=action, total_latency_ms=elapsed_ms,
+                           timing={"classifier_ms": classifier_ms,
+                                   "dashboard_api_ms": self.dashboard_api_ms})
+            if accepted:
+                self.ui.update(last_command_raw=text, last_command=command,
+                               last_command_time=datetime.now().astimezone().isoformat(timespec="seconds"))
+        self.print(f"[typed] {decision}" + (f": {command}" if accepted else "")
+                   + (f" | action: {action}" if action else ""))
+        return {"decision": decision, "command": command if accepted else None,
+                "action": action, "classifier_ms": classifier_ms,
+                "total_latency_ms": elapsed_ms}
+
     def execute_command(self, command: str) -> str:
+        with self.action_lock:
+            return self._execute_command(command)
+
+    def _execute_command(self, command: str) -> str:
         if command == "pick_up_can":
             return "Not executed: can position and grasp plan are not available"
         if command == "cancel":

@@ -21,10 +21,10 @@
   #connection { color: #fca5a5; }
 </style>
 <h1>Care Reach Pi voice test</h1>
-<span class="badge">Pi USB mic · Cartesia transcription · Jev decision model via OpenRouter</span>
+<span class="badge">Pi USB mic · Cartesia transcription · Local commands and Jev</span>
 <p>Models: <strong id="model">Loading…</strong></p>
 <p>Command path: <strong id="commandBackend">Checking…</strong></p>
-<p>Cartesia transcribes the mic live. When it hears “Hey Arm,” the Pi sends only the words after that phrase to Jev through OpenRouter. Jev chooses the command.</p>
+<p>Cartesia transcribes the mic live. After “Hey Arm,” the five direct hand and pose commands run through local phrase matching. Other requests go to Jev through OpenRouter.</p>
 <button id="listenButton" onclick="toggleListening()">Pause listening</button>
 <p>Try <strong>“Hey Arm, open the hand”</strong>, “close the hand,” “retract,” “extend,” or “dance.” Retract goes to Home. Extend points the arm straight up. Fold is disabled because the wrist camera blocks that position.</p>
 <p>Say “Hey Arm” and the command in the same utterance. Keep clear of the arm while it moves. “Pick up the can” is recognized, but it cannot run until the camera can locate the can.</p>

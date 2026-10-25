@@ -44,6 +44,9 @@ def motor_id(value):
 ACCEPTED_HOSTNAMES = ("localhost", "127.0.0.1", "pi", "pi.local")
 VOICE_URL = "http://127.0.0.1:8770"
 ULTRASONIC_URL = "http://127.0.0.1:8767/state"
+VOICE_TRIALS = {"pick_up_can", "open_gripper", "close_gripper", "cancel", "stop", "none"}
+VOICE_STATE_MAX_BYTES = 256 * 1024
+VOICE_AUDIO_MAX_BYTES = 16 * 1024 * 1024
 
 
 def voice_state():
@@ -60,6 +63,35 @@ def set_voice_enabled(enabled):
     with urlopen(request, timeout=3) as response:
         response.read()
     return {"enabled": enabled}
+
+
+def audio_dashboard_state():
+    """Fetch the audio panel's state from the local voice process only."""
+    with urlopen(f"{VOICE_URL}/state", timeout=3) as response:
+        body = response.read(VOICE_STATE_MAX_BYTES + 1)
+    if len(body) > VOICE_STATE_MAX_BYTES:
+        raise ValueError("Voice state is too large")
+    state = json.loads(body)
+    if not isinstance(state, dict):
+        raise ValueError("Invalid voice state")
+    return state
+
+
+def audio_dashboard_action(path, payload=None, *, timeout=3):
+    """Send one fixed action to the loopback voice process."""
+    body = json.dumps(payload if payload is not None else {}).encode()
+    request = Request(f"{VOICE_URL}{path}", data=body,
+                      headers={"Content-Type": "application/json"}, method="POST")
+    with urlopen(request, timeout=timeout) as response:
+        result = response.read(16 * 1024 + 1)
+    if len(result) > 16 * 1024:
+        raise ValueError("Voice response is too large")
+    if path == "/text":
+        value = json.loads(result)
+        if not isinstance(value, dict):
+            raise ValueError("Invalid voice response")
+        return value
+    return {"ok": True}
 
 
 def ultrasonic_state():
@@ -185,6 +217,28 @@ def handler_for(arm, port):
                 except (OSError, URLError, ValueError, KeyError, TypeError) as exc:
                     logging.warning("Voice service unavailable: %s", type(exc).__name__)
                     self.reply(503, {"error": "Transcription service unavailable"})
+            elif path == "/api/audio/state":
+                try:
+                    self.reply(200, audio_dashboard_state())
+                except (OSError, URLError, ValueError, TypeError) as exc:
+                    logging.warning("Audio state unavailable: %s", type(exc).__name__)
+                    self.reply(503, {"error": "Audio service unavailable"})
+            elif path == "/api/audio/last-utterance.wav":
+                try:
+                    with urlopen(f"{VOICE_URL}/last-utterance.wav", timeout=5) as response:
+                        body = response.read(VOICE_AUDIO_MAX_BYTES + 1)
+                    if len(body) > VOICE_AUDIO_MAX_BYTES:
+                        raise ValueError("Saved audio is too large")
+                except (OSError, URLError, ValueError) as exc:
+                    logging.warning("Saved audio unavailable: %s", type(exc).__name__)
+                    self.reply(503, {"error": "Saved audio unavailable"})
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "audio/wav")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
             elif path == "/api/ultrasonic":
                 try:
                     self.reply(200, ultrasonic_state())
@@ -221,6 +275,27 @@ def handler_for(arm, port):
                     except (OSError, URLError, ValueError) as exc:
                         logging.warning("Voice service unavailable: %s", type(exc).__name__)
                         self.reply(503, {"error": "Transcription service unavailable"})
+                        return
+                elif path in {"/api/audio/diagnostic", "/api/audio/trial", "/api/audio/text"}:
+                    if path == "/api/audio/diagnostic":
+                        if data:
+                            raise ValueError("diagnostic requires an empty object")
+                        upstream_path, payload, timeout = "/diagnostic", {}, 3
+                    elif path == "/api/audio/trial":
+                        if (set(data) != {"expected"} or type(data["expected"]) is not str
+                                or data["expected"] not in VOICE_TRIALS):
+                            raise ValueError("Invalid trial")
+                        upstream_path, payload, timeout = "/trial", data, 3
+                    else:
+                        if (set(data) != {"text"} or type(data["text"]) is not str
+                                or not 1 <= len(data["text"].strip()) <= 500):
+                            raise ValueError("text must be 1–500 nonblank characters")
+                        upstream_path, payload, timeout = "/text", data, 25
+                    try:
+                        result = audio_dashboard_action(upstream_path, payload, timeout=timeout)
+                    except (OSError, URLError, ValueError, TypeError) as exc:
+                        logging.warning("Audio action unavailable: %s", type(exc).__name__)
+                        self.reply(503, {"error": "Audio service unavailable"})
                         return
                 elif path == "/api/movement/mode":
                     if set(data) == {"movement_mode"}:

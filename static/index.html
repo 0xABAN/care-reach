@@ -74,6 +74,18 @@
     .history { margin: 16px 0; color: #aebec7; }
     .history summary { cursor: pointer; }
     .history ul { margin: 8px 0; padding-left: 22px; }
+    .audio-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin: 16px 0; }
+    .audio-card { min-width: 0; background: #1c2a32; border: 1px solid #33454f; border-radius: 14px; padding: 17px; }
+    .audio-card h2 { font-size: 1rem; margin: 0 0 8px; }
+    .audio-card p { margin: 8px 0 0; }
+    .audio-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px; margin: 16px 0; }
+    .audio-value { min-height: 1.4em; overflow-wrap: anywhere; }
+    .audio-stack { display: grid; gap: 12px; margin: 16px 0; }
+    .audio-form { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+    .audio-form input { min-width: 220px; flex: 1; min-height: 41px; padding: 8px 10px; border: 1px solid #506570; border-radius: 9px; background: #10191f; color: inherit; font: inherit; }
+    .audio-trials { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+    .audio-card pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 300px; overflow: auto; margin: 10px 0 0; font: .85rem/1.5 ui-monospace, monospace; color: #d1dce3; }
+    .audio-card audio { width: 100%; margin-top: 12px; }
     @media (max-width: 1000px) { .joint { grid-template-columns: 1fr 1fr; } }
     @media (max-width: 700px) { .camera-layout { grid-template-columns: 1fr; } }
     @media (max-width: 600px) { body { padding: 14px; } .top { flex-direction: column; } .top-actions { width: 100%; } .top-actions button { flex: 1; white-space: normal; } .joint { grid-template-columns: 1fr; } }
@@ -84,13 +96,13 @@
     <nav class="tabs" role="tablist" aria-label="Dashboard views">
       <button id="tab-controls" role="tab" aria-controls="controls-panel" aria-selected="true">Controls</button>
       <button id="tab-camera" role="tab" aria-controls="camera-panel" aria-selected="false">Camera</button>
+      <button id="tab-audio" role="tab" aria-controls="audio-panel" aria-selected="false">Audio</button>
     </nav>
     <section id="controls-panel" role="tabpanel" aria-labelledby="tab-controls">
     <div class="top">
       <div><h1>SO-101 Joint Control</h1><p class="subtitle muted">Hold a direction to move any joint. Release to hold its measured position.</p><p class="subtitle muted" id="extended-pose"></p></div>
-      <div class="top-actions"><button class="transcription" id="transcription-toggle" role="switch" aria-checked="false" disabled>Transcription: checking…</button><label class="mode-control" for="movement-mode">Movement mode<select id="movement-mode" aria-describedby="movement-mode-note" disabled><option value="coordinated">Coordinated</option><option value="shoulder_isolated">Motor 2 isolated</option><option value="single_joint">Single joint</option></select></label><button class="pose" id="pose-home">Home / Retract</button><button class="pose" id="pose-extend">Extend</button><button class="pose" id="pose-dance">Dance</button><button class="pose" id="pose-press_button">Press button</button><button class="pose" id="pose-lift_this">Lift this</button><button class="hold-all" id="hold-all">Hold all joints</button><button class="release" id="release" disabled title="Torque release is unavailable">Torque release unavailable</button></div>
+      <div class="top-actions"><label class="mode-control" for="movement-mode">Movement mode<select id="movement-mode" aria-describedby="movement-mode-note" disabled><option value="coordinated">Coordinated</option><option value="shoulder_isolated">Motor 2 isolated</option><option value="single_joint">Single joint</option></select></label><button class="pose" id="pose-home">Home / Retract</button><button class="pose" id="pose-extend">Extend</button><button class="pose" id="pose-dance">Dance</button><button class="pose" id="pose-press_button">Press button</button><button class="pose" id="pose-lift_this">Lift this</button><button class="hold-all" id="hold-all">Hold all joints</button><button class="release" id="release" disabled title="Torque release is unavailable">Torque release unavailable</button></div>
     </div>
-    <p id="voice-status" class="voice-status muted" role="status">Checking voice service…</p>
     <p id="movement-mode-note" class="movement-mode-note muted">Coordinated mode runs group moves. Motor 2 isolated lets the other joints move together, or motor 2 move alone. Saved moves are available only when their whole path fits that rule; Home, Extend, and Dance need coordinated mode. Single joint mode allows one joint at a time. You can save taught steps while the arm is idle in any mode. The servos stay powered to hold position, and motor 2 can still have a voltage dip when it moves alone.</p>
     <div id="status" class="status">Connecting to the arm…</div>
     <details class="teach" id="teach">
@@ -124,6 +136,56 @@
         </section>
       </div>
     </section>
+    <section id="audio-panel" role="tabpanel" aria-labelledby="tab-audio" hidden>
+      <h1>Audio</h1>
+      <p class="subtitle muted">Say “Hey Arm” and a command in the same phrase, or type a request below. Typed requests go to Jev without a wake phrase.</p>
+      <div class="audio-actions">
+        <button class="transcription" id="transcription-toggle" role="switch" aria-checked="false" disabled>Transcription: checking…</button>
+        <span id="voice-status" class="muted" role="status">Checking voice service…</span>
+      </div>
+      <section class="audio-card" aria-labelledby="audio-type-heading">
+        <h2 id="audio-type-heading">Type a request</h2>
+        <form id="audio-text-form" class="audio-form">
+          <label class="group-label" for="audio-text-input">Command</label>
+          <input id="audio-text-input" type="text" maxlength="500" autocomplete="off" placeholder="Close the hand" required>
+          <button id="audio-text-submit" type="submit">Send to Jev</button>
+        </form>
+        <p id="audio-text-result" class="muted" role="status" aria-live="polite">Nothing sent yet.</p>
+      </section>
+      <div class="audio-grid">
+        <section class="audio-card"><h2>Live status</h2><div id="audio-live-status" class="audio-value">Connecting…</div></section>
+        <section class="audio-card"><h2>USB mic level</h2><div id="audio-level" class="audio-value">—</div></section>
+        <section class="audio-card"><h2>Model and command path</h2><div id="audio-model" class="audio-value">—</div><p id="audio-backend" class="muted">—</p></section>
+        <section class="audio-card"><h2>Exact transcription</h2><div id="audio-raw" class="audio-value">—</div></section>
+        <section class="audio-card"><h2>Decision</h2><div id="audio-decision" class="audio-value">—</div></section>
+        <section class="audio-card"><h2>Last action result</h2><div id="audio-action" class="audio-value">—</div></section>
+        <section class="audio-card"><h2>Timing</h2><div id="audio-timing" class="audio-value">—</div></section>
+        <section class="audio-card"><h2>Last accepted command</h2><div id="audio-last-command" class="audio-value">—</div></section>
+      </div>
+      <div class="audio-stack">
+        <section class="audio-card" aria-labelledby="audio-check-heading">
+          <h2 id="audio-check-heading">Check what the mic heard</h2>
+          <p class="muted">Save the next phrase, then replay it here. The recording stays on the Pi.</p>
+          <button id="audio-diagnostic" type="button">Save next utterance</button>
+          <audio id="audio-replay" controls hidden></audio>
+        </section>
+        <section class="audio-card" aria-labelledby="audio-trial-heading">
+          <h2 id="audio-trial-heading">Score a 90-second trial</h2>
+          <p class="muted">Choose the result you expect, then speak. A trial starts listening if it is paused.</p>
+          <div class="audio-trials">
+            <button type="button" data-audio-trial="open_gripper">Open gripper</button>
+            <button type="button" data-audio-trial="close_gripper">Close gripper</button>
+            <button type="button" data-audio-trial="pick_up_can">Pick up can (unsupported)</button>
+            <button type="button" data-audio-trial="stop">Stop</button>
+            <button type="button" data-audio-trial="cancel">Cancel</button>
+            <button type="button" data-audio-trial="none">No wake word</button>
+          </div>
+          <p id="audio-trial-status" class="muted">No trial running.</p>
+        </section>
+        <section class="audio-card"><h2>Test report</h2><pre id="audio-report">No trials yet.</pre></section>
+        <section class="audio-card"><h2>Recent activity</h2><pre id="audio-messages">—</pre></section>
+      </div>
+    </section>
   </main>
   <script>
     const joints = document.getElementById('joints');
@@ -131,6 +193,7 @@
     const cameraFeed = document.getElementById('camera-feed');
     const camera2Feed = document.getElementById('camera2-feed');
     const cameraPanel = document.getElementById('camera-panel');
+    const audioPanel = document.getElementById('audio-panel');
     const rangeCard = document.getElementById('range-card');
     const rangeValue = document.getElementById('range-value');
     const rangeUnit = document.getElementById('range-unit');
@@ -255,16 +318,22 @@
     function showTab(name) {
       endPress();
       const camera = name === 'camera';
-      document.getElementById('controls-panel').hidden = camera;
+      const audio = name === 'audio';
+      document.getElementById('controls-panel').hidden = name !== 'controls';
       cameraPanel.hidden = !camera;
-      document.getElementById('tab-controls').setAttribute('aria-selected', String(!camera));
+      audioPanel.hidden = !audio;
+      document.getElementById('tab-controls').setAttribute('aria-selected', String(name === 'controls'));
       document.getElementById('tab-camera').setAttribute('aria-selected', String(camera));
+      document.getElementById('tab-audio').setAttribute('aria-selected', String(audio));
       syncCameraPolls();
       if (camera) refreshRange();
       else if (rangeRequest) rangeRequest.abort();
+      if (audio) refreshAudio();
+      else if (audioRequest) audioRequest.abort();
     }
     document.getElementById('tab-controls').addEventListener('click', () => showTab('controls'));
     document.getElementById('tab-camera').addEventListener('click', () => showTab('camera'));
+    document.getElementById('tab-audio').addEventListener('click', () => showTab('audio'));
     cameraFeed.addEventListener('error', () => { document.getElementById('camera-error').hidden = false; });
     camera2Feed.addEventListener('error', () => { document.getElementById('camera2-error').hidden = false; });
     let press = null;
@@ -276,6 +345,8 @@
     const voiceStatus = document.getElementById('voice-status');
     let transcriptionEnabled = null;
     let transcriptionBusy = false;
+    let audioRequest = null;
+    let audioSequence = 0;
 
     function renderTranscription(enabled, detail = '') {
       transcriptionEnabled = enabled;
@@ -287,14 +358,50 @@
         'Cartesia transcription is off; no microphone audio is sent.');
     }
 
-    async function refreshTranscription() {
-      if (transcriptionBusy) return;
+    async function refreshAudio() {
+      if (audioPanel.hidden || document.hidden || audioRequest) return;
+      const request = new AbortController();
+      audioRequest = request;
       try {
-        const response = await fetch('/api/transcription', {cache: 'no-store'});
+        const response = await fetch('/api/audio/state', {cache: 'no-store', signal: request.signal});
         const state = await response.json();
         if (!response.ok) throw new Error(state.error || 'Could not reach voice service');
-        renderTranscription(state.enabled);
-      } catch (error) { renderTranscription(null, error.message); }
+        if (audioPanel.hidden || document.hidden) return;
+        renderTranscription(state.listening);
+        document.getElementById('audio-live-status').textContent = state.status || 'Waiting for the voice service.';
+        document.getElementById('audio-model').textContent = state.model || 'Unknown model';
+        document.getElementById('audio-backend').textContent = state.command_backend || 'Command path unavailable';
+        document.getElementById('audio-level').textContent = state.stt_mode === 'stream' ?
+          `${state.mic_level ?? '—'} (Cartesia turn detection)` :
+          `${state.mic_level ?? '—'} (trigger: ${state.trigger_level ?? '—'})`;
+        document.getElementById('audio-raw').textContent = state.raw || '—';
+        document.getElementById('audio-decision').textContent = state.command ?
+          `${state.decision || 'accepted'}: ${state.command}` : (state.decision || '—');
+        document.getElementById('audio-action').textContent = state.action || '—';
+        const timing = state.timing || {};
+        document.getElementById('audio-timing').textContent = timing.turn_ms !== undefined ?
+          `Model turn ${timing.turn_ms ?? '—'} ms · first text ${timing.first_partial_ms ?? '—'} ms · final confirmation ${timing.finalize_ms ?? '—'} ms · command ${timing.classifier_ms ?? '—'} ms · dashboard API ${timing.dashboard_api_ms ?? '—'} ms` :
+          `Capture ${timing.capture_ms ?? '—'} ms · speech end ${timing.endpoint_ms ?? '—'} ms · STT ${timing.stt_ms ?? '—'} ms · command ${timing.classifier_ms ?? '—'} ms · dashboard API ${timing.dashboard_api_ms ?? '—'} ms`;
+        document.getElementById('audio-last-command').textContent = state.last_command ?
+          `${state.last_command_time || ''}: ${state.last_command_raw || ''} → ${state.last_command}` : '—';
+        document.getElementById('audio-trial-status').textContent = state.trial || 'No trial running.';
+        document.getElementById('audio-report').textContent = state.report || 'No trials yet.';
+        document.getElementById('audio-messages').textContent = Array.isArray(state.messages) ?
+          state.messages.slice(-14).join('\n') : '—';
+        if (Number.isInteger(state.audio_sequence) && state.audio_sequence > audioSequence) {
+          audioSequence = state.audio_sequence;
+          const replay = document.getElementById('audio-replay');
+          replay.src = `/api/audio/last-utterance.wav?v=${audioSequence}`;
+          replay.hidden = false;
+        }
+      } catch (error) {
+        if (error.name !== 'AbortError' && !audioPanel.hidden && !document.hidden) {
+          renderTranscription(null, error.message);
+          document.getElementById('audio-live-status').textContent = 'Voice service unavailable.';
+        }
+      } finally {
+        if (audioRequest === request) audioRequest = null;
+      }
     }
 
     transcriptionToggle.addEventListener('click', async () => {
@@ -306,11 +413,50 @@
         const state = await api('/api/transcription', {enabled: !transcriptionEnabled});
         transcriptionBusy = false;
         renderTranscription(state.enabled);
+        refreshAudio();
       } catch (error) {
         transcriptionBusy = false;
         renderTranscription(null, error.message);
       }
     });
+
+    const audioTextForm = document.getElementById('audio-text-form');
+    audioTextForm.addEventListener('submit', async event => {
+      event.preventDefault();
+      const input = document.getElementById('audio-text-input');
+      const text = input.value.trim();
+      if (!text) return;
+      const button = document.getElementById('audio-text-submit');
+      const resultBox = document.getElementById('audio-text-result');
+      input.disabled = button.disabled = true;
+      resultBox.textContent = 'Waiting for Jev…';
+      try {
+        const result = await api('/api/audio/text', {text});
+        const decision = result.command ? `${result.decision || 'accepted'}: ${result.command}` :
+          (result.decision || 'rejected');
+        resultBox.textContent = result.action ? `${decision} · ${result.action}` : decision;
+        input.value = '';
+        refreshAudio();
+      } catch (error) { resultBox.textContent = error.message; }
+      finally { input.disabled = button.disabled = false; }
+    });
+
+    document.getElementById('audio-diagnostic').addEventListener('click', async () => {
+      try {
+        await api('/api/audio/diagnostic', {});
+        document.getElementById('audio-live-status').textContent = 'The next utterance will be saved for replay.';
+        refreshAudio();
+      } catch (error) { document.getElementById('audio-live-status').textContent = error.message; }
+    });
+    document.querySelectorAll('[data-audio-trial]').forEach(button => button.addEventListener('click', async () => {
+      button.disabled = true;
+      try {
+        await api('/api/audio/trial', {expected: button.dataset.audioTrial});
+        document.getElementById('audio-trial-status').textContent = 'Trial started. Speak now.';
+        refreshAudio();
+      } catch (error) { document.getElementById('audio-trial-status').textContent = error.message; }
+      finally { button.disabled = false; }
+    }));
 
     movementModeSelect.addEventListener('change', async () => {
       if (movementModeBusy || !lastState) return;
@@ -544,13 +690,20 @@
     window.addEventListener('pointerup', endPress);
     window.addEventListener('pointercancel', endPress);
     document.addEventListener('visibilitychange', () => {
-      if (document.hidden) { endPress(); if (rangeRequest) rangeRequest.abort(); }
-      else refreshRange();
+      if (document.hidden) {
+        endPress();
+        if (rangeRequest) rangeRequest.abort();
+        if (audioRequest) audioRequest.abort();
+      } else {
+        refreshRange();
+        refreshAudio();
+      }
       syncCameraPolls();
     });
     window.addEventListener('pagehide', (event) => {
       endPress();
       stopCameraPolls();
+      if (audioRequest) audioRequest.abort();
       if (event.persisted) return; // bfcache restore keeps the shown frame; object URLs survive it
       for (const camera of cameraPolls) {
         if (camera.url) { URL.revokeObjectURL(camera.url); camera.url = null; }
@@ -558,7 +711,7 @@
     });
     window.addEventListener('pageshow', () => syncCameraPolls());
     refresh(); setInterval(refresh, 1000);
-    refreshTranscription(); setInterval(refreshTranscription, 2000);
+    setInterval(refreshAudio, 700);
     setInterval(refreshRange, 200);
   </script>
 </body>
