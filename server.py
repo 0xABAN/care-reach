@@ -68,6 +68,10 @@ TAUGHT_PATH = ROOT / "taught_moves.json"
 TAUGHT_MAX_STEPS = 12
 TAUGHT_VMAX = (120, 90, 120, 90, 100, 120)
 TAUGHT_AMAX = (240, 180, 240, 180, 200, 240)
+# Lifting a load needs more lead than Extend; 80 matches Home and Dance.
+TAUGHT_MAX_LEAD = POSE_MAX_LEAD
+# A loaded joint may sag a little short of its last step and stop there.
+TAUGHT_SETTLE_TOLERANCE = 60
 POSE_NAMES = ("home", "extend", "dance") + TAUGHT_MOVES
 
 
@@ -717,6 +721,9 @@ class Arm:
         goals = {}
         behind = False
         taught = hold["pose"] in TAUGHT_MOVES
+        lead = TAUGHT_MAX_LEAD if taught else EXTEND_MAX_LEAD
+        last_frame = frame_index == len(frames) - 1
+        settled = hold.setdefault("settled", set())
         for index, name in enumerate(JOINT_NAMES):
             position = positions[name]
             load = abs(snapshot[name]["load"])
@@ -733,16 +740,23 @@ class Arm:
                 hold["progress_time"][name] = now
             elif (abs(frame[index] - position) > POSE_TOLERANCE
                   and now - hold["progress_time"][name] >= POSE_STALL_SECONDS):
-                raise RuntimeError(f"Motor {index + 1} stalled at {position}")
+                gap = abs(frame[index] - position)
+                # A loaded taught move only stalls when the full push cannot
+                # move it, or when it stops well short of the last step.
+                if not taught or gap > (TAUGHT_SETTLE_TOLERANCE if last_frame else lead):
+                    raise RuntimeError(f"Motor {index + 1} stalled at {position}")
+                if last_frame:
+                    settled.add(name)
             distance = frame[index] - position
-            behind |= abs(distance) > EXTEND_MAX_LEAD
-            goals[name] = position + max(-EXTEND_MAX_LEAD, min(EXTEND_MAX_LEAD, distance))
+            behind |= abs(distance) > lead
+            goals[name] = position + max(-lead, min(lead, distance))
         validate_pose(tuple(goals[name] for name in JOINT_NAMES), envelope)
         for name in JOINT_NAMES:
             if not self.firmware_min[name] <= goals[name] <= self.firmware_max[name]:
                 raise RuntimeError(f"{name} trajectory goal exceeds firmware limits")
         if frame_index == len(frames) - 1 and all(
             abs(hold["target"][index] - positions[name]) <= POSE_TOLERANCE
+            or name in settled
             or (taught and name == "gripper" and hold["target"][index] < positions[name])
             for index, name in enumerate(JOINT_NAMES)
         ):

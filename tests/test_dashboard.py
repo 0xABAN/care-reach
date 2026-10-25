@@ -669,6 +669,24 @@ class BlockedGripBus(TrackingBus):
         self.positions["gripper"] = max(self.positions["gripper"], self.floor)
 
 
+class WeakShoulderBus(TrackingBus):
+    """Under load the shoulder needs a 60-tick lead to lift and sags 45 ticks."""
+
+    def __init__(self, positions, lifted):
+        super().__init__(positions)
+        self.lifted = lifted
+
+    def sync_write(self, register, values, normalize=True):
+        before = self.positions["shoulder_lift"]
+        super().sync_write(register, values, normalize)
+        if register != "Goal_Position":
+            return
+        lifting = values["shoulder_lift"] < before
+        if lifting and before - values["shoulder_lift"] < 60:
+            self.positions["shoulder_lift"] = before
+        self.positions["shoulder_lift"] = max(self.positions["shoulder_lift"], self.lifted + 45)
+
+
 class TaughtMoveTests(DashboardBase):
     HOME = home_target()
 
@@ -761,6 +779,35 @@ class TaughtMoveTests(DashboardBase):
         self.assertEqual(bus.positions["gripper"], floor)
         self.assertEqual(bus.goals["gripper"], floor - GRIP_HOLD_LEAD)
         self.assertLessEqual(abs(bus.positions["shoulder_lift"] - lifted[1]), POSE_TOLERANCE)
+
+    def test_loaded_lift_uses_larger_lead_and_settles_short_of_target(self):
+        lowered = self.offset(0, 300, -200, 0, 0, 0)
+        lifted = self.offset(0, 0, -200, 0, 0, 0)
+        free = TrackingBus(self.HOME)
+        teacher = self.taught_arm(free)
+        self.teach(teacher, free, "lift_this", [lowered, lifted])
+        bus = WeakShoulderBus(lowered, lifted[1])
+        arm = self.taught_arm(bus)
+        arm.taught = teacher.taught
+        arm.pose_start("lift_this")
+        self.assertTrue(self.run_pose(arm), "loaded lift did not finish")
+        self.assertIsNone(arm.error)
+        self.assertGreaterEqual(bus.positions["shoulder_lift"], lifted[1] + 45)
+        self.assertLessEqual(bus.positions["shoulder_lift"], lifted[1] + 60)
+        self.assertLessEqual(max(bus.leads), 80)
+
+    def test_blocked_joint_far_from_target_still_stalls(self):
+        lowered = self.offset(0, 300, -200, 0, 0, 0)
+        lifted = self.offset(0, 0, -200, 0, 0, 0)
+        free = TrackingBus(self.HOME)
+        teacher = self.taught_arm(free)
+        self.teach(teacher, free, "lift_this", [lowered, lifted])
+        bus = WeakShoulderBus(lowered, lifted[1] + 100)  # Stops 145 ticks short.
+        arm = self.taught_arm(bus)
+        arm.taught = teacher.taught
+        arm.pose_start("lift_this")
+        with self.assertRaisesRegex(RuntimeError, "Motor 2 stalled"):
+            self.run_pose(arm)
 
     def test_stop_cancels_taught_move_and_holds_measured(self):
         bus = TrackingBus(self.HOME)
