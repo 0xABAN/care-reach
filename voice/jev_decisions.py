@@ -22,6 +22,7 @@ CRITERIA = {
     "extend": "Direct request to extend or raise the arm into its upright straight-up pose.",
     "dance": "Direct request for the robot arm to dance, jig, or perform its saved dance.",
     "lift_this": "Direct request to lift, pick up, or grab the object in front of the robot.",
+    "bring_to_mouth": "Direct request to bring the held can or cup to the speaker's mouth so they can drink.",
     "press_button": "Direct request to press, push, or hit the button.",
     "stop": "Direct request to stop current robot motion immediately.",
     "cancel": "Direct request to cancel a pending robot request or wake window.",

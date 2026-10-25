@@ -104,15 +104,16 @@
     <section id="controls-panel" role="tabpanel" aria-labelledby="tab-controls">
     <div class="top">
       <div><h1>SO-101 Joint Control</h1><p class="subtitle muted">Hold a direction to move any joint. Release to hold its measured position.</p><p class="subtitle muted" id="extended-pose"></p></div>
-      <div class="top-actions"><label class="mode-control" for="movement-mode">Movement mode<select id="movement-mode" aria-describedby="movement-mode-note" disabled><option value="coordinated">Coordinated</option><option value="shoulder_isolated">Motor 2 isolated</option><option value="single_joint">Single joint</option></select></label><button class="pose" id="pose-home">Home / Retract</button><button class="pose" id="pose-extend">Extend</button><button class="pose" id="pose-dance">Dance</button><button class="pose" id="pose-press_button">Press button</button><button class="pose" id="pose-lift_this">Lift this</button><button class="hold-all" id="hold-all">Hold all joints</button><button class="release" id="release" disabled title="Torque release is unavailable">Torque release unavailable</button></div>
+      <div class="top-actions"><label class="mode-control" for="movement-mode">Movement mode<select id="movement-mode" aria-describedby="movement-mode-note" disabled><option value="coordinated">Coordinated</option><option value="shoulder_isolated">Motor 2 isolated</option><option value="single_joint">Single joint</option></select></label><button class="pose" id="pose-home">Home / Retract</button><button class="pose" id="pose-extend">Extend</button><button class="pose" id="pose-dance">Dance</button><button class="pose" id="pose-press_button">Press button</button><button class="pose" id="pose-lift_this">Lift this</button><button class="pose" id="pose-bring_to_mouth">Bring to mouth</button><button class="hold-all" id="hold-all">Hold all joints</button><button class="release" id="release" disabled title="Torque release is unavailable">Torque release unavailable</button></div>
     </div>
     <p id="movement-mode-note" class="movement-mode-note muted">Coordinated mode runs group moves. Motor 2 isolated lets the other joints move together, or motor 2 move alone. Saved moves are available only when their whole path fits that rule; Home, Extend, and Dance need coordinated mode. Single joint mode allows one joint at a time. You can save taught steps while the arm is idle in any mode. The servos stay powered to hold position, and motor 2 can still have a voltage dip when it moves alone.</p>
     <div id="status" class="status">Connecting to the arm…</div>
     <details class="teach" id="teach">
       <summary>Teach moves</summary>
-      <p class="muted">Jog the arm to each position in order, then press Save. Playback moves smoothly through the saved steps. For Lift this, save an open-gripper step above the object, one lowered around it, one with the gripper closed, then one lifted. The gripper may stop on the object; that counts as a grip.</p>
+      <p class="muted">Jog the arm to each position in order, then press Save. Playback moves smoothly through the saved steps. For Lift this, save an open-gripper step above the object, one lowered around it, one with the gripper closed, then one lifted. The gripper may stop on the object; that counts as a grip. For Bring to mouth, start with the can already gripped (run Lift this first), save a few steps toward the person, one just in front of their mouth, and keep the last step short. It always runs at 1× and moves one heavy joint at a time. Test it without a person first.</p>
       <div class="teach-row" data-move="press_button"><span class="name">Press button</span><span class="muted steps">0 steps</span><button class="save">Save current position</button><button class="clear">Clear</button><span class="speeds" role="group" aria-label="Playback speed"><span class="muted">Speed</span><button data-speed="1">1×</button><button data-speed="1.5">1.5×</button><button data-speed="2">2×</button></span></div>
       <div class="teach-row" data-move="lift_this"><span class="name">Lift this</span><span class="muted steps">0 steps</span><button class="save">Save current position</button><button class="clear">Clear</button><span class="speeds" role="group" aria-label="Playback speed"><span class="muted">Speed</span><button data-speed="1">1×</button><button data-speed="1.5">1.5×</button><button data-speed="2">2×</button></span></div>
+      <div class="teach-row" data-move="bring_to_mouth"><span class="name">Bring to mouth</span><span class="muted steps">0 steps</span><button class="save">Save current position</button><button class="clear">Clear</button><span class="speeds" role="group" aria-label="Playback speed"><span class="muted">Speed</span><button data-speed="1">1×</button><span class="muted">(fixed near a face)</span></span></div>
     </details>
     <details class="history"><summary>Recent power and servo events</summary><ul id="fault-history"><li>Loading…</li></ul></details>
     <div id="joints" class="grid"></div>
@@ -629,7 +630,7 @@
         homeBtn.classList.toggle('active', poseActive && pose.name === 'home');
         extendBtn.classList.toggle('active', poseActive && pose.name === 'extend');
         danceBtn.classList.toggle('active', poseActive && pose.name === 'dance');
-        for (const move of ['press_button', 'lift_this']) {
+        for (const move of ['press_button', 'lift_this', 'bring_to_mouth']) {
           const steps = (state.taught_moves || {})[move] || 0;
           const button = document.getElementById(`pose-${move}`);
           button.disabled = !steps || poseDisabled(move);
@@ -670,7 +671,7 @@
     document.getElementById('pose-home').addEventListener('click', () => togglePose('home'));
     document.getElementById('pose-extend').addEventListener('click', () => togglePose('extend'));
     document.getElementById('pose-dance').addEventListener('click', () => togglePose('dance'));
-    for (const move of ['press_button', 'lift_this']) {
+    for (const move of ['press_button', 'lift_this', 'bring_to_mouth']) {
       document.getElementById(`pose-${move}`).addEventListener('click', () => togglePose(move));
       const row = document.querySelector(`.teach-row[data-move="${move}"]`);
       row.querySelector('.save').addEventListener('click', async () => {

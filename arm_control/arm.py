@@ -65,13 +65,17 @@ EXTEND_FPS = 20
 EXTEND_MAX_LEAD = 55
 EXTEND_VMAX = (180, 90, 200, 90, 100, 100)
 EXTEND_AMAX = (300, 180, 260, 180, 200, 200)
-TAUGHT_MOVES = ("press_button", "lift_this")
+TAUGHT_MOVES = ("press_button", "lift_this", "bring_to_mouth")
+# Moves that start with the object already gripped. They always lift one heavy
+# joint at a time and run only at 1x, because they end near a person's face.
+TAUGHT_CARRYING = frozenset({"bring_to_mouth"})
 TAUGHT_PATH = ROOT / "taught_moves.json"
 TAUGHT_MAX_STEPS = 12
 TAUGHT_VMAX = (120, 90, 120, 90, 100, 120)
 TAUGHT_AMAX = (240, 180, 240, 180, 200, 240)
 # Per-move playback speed, chosen on the dashboard. Capped by MAX_COMMAND_*.
 TAUGHT_SPEEDS = (1.0, 1.5, 2.0)
+TAUGHT_MOVE_SPEEDS = {"bring_to_mouth": (1.0,)}
 TAUGHT_MAX_LEAD = (POSE_MAX_LEAD, 120, 120, POSE_MAX_LEAD, POSE_MAX_LEAD, POSE_MAX_LEAD)
 TAUGHT_SETTLE_TOLERANCE = 60
 POSE_NAMES = ("home", "extend", "dance") + TAUGHT_MOVES
@@ -105,7 +109,7 @@ def load_taught_speeds(path: Path) -> dict[str, float]:
     if isinstance(saved, dict):
         for name in TAUGHT_MOVES:
             value = saved.get(name)
-            if type(value) in (int, float) and float(value) in TAUGHT_SPEEDS:
+            if type(value) in (int, float) and float(value) in TAUGHT_MOVE_SPEEDS.get(name, TAUGHT_SPEEDS):
                 speeds[name] = float(value)
     return speeds
 
@@ -122,15 +126,19 @@ def taught_limits(speed: float) -> tuple[tuple[float, ...], tuple[float, ...]]:
 CARRY_ORDER = ((2,), (1,), (0, 3, 4))
 
 
-def taught_segments(start, steps):
-    """Waypoint pairs to replay; loaded segments are split joint by joint."""
+def taught_segments(start, steps, carrying_move=False):
+    """Waypoint pairs to replay; loaded segments are split joint by joint.
+
+    ``carrying_move`` means the object is already gripped when the move starts,
+    so every segment that keeps the gripper still is a loaded segment.
+    """
     grips = [step[5] for step in steps]
     closes = any(later < earlier - POSE_TOLERANCE for earlier, later in zip(grips, grips[1:]))
     closed = min(grips)
     segments = []
     for begin, end in zip((tuple(start), *steps), steps):
-        carrying = (closes and abs(end[5] - begin[5]) <= POSE_TOLERANCE
-                    and begin[5] <= closed + POSE_TOLERANCE)
+        steady = abs(end[5] - begin[5]) <= POSE_TOLERANCE
+        carrying = steady and (carrying_move or (closes and begin[5] <= closed + POSE_TOLERANCE))
         if not carrying:
             segments.append((tuple(begin), tuple(end)))
             continue
@@ -775,7 +783,8 @@ class Arm:
             if taught:
                 trajectory = []
                 vmax, amax = taught_limits(self.taught_speed[pose])
-                for begin, end in taught_segments(start_ticks, self.taught[pose]):
+                for begin, end in taught_segments(start_ticks, self.taught[pose],
+                                                  carrying_move=pose in TAUGHT_CARRYING):
                     trajectory += quintic_segment(begin, end, vmax, amax, EXTEND_FPS)
             elif coordinated:
                 trajectory = quintic_segment(start_ticks, target, EXTEND_VMAX, EXTEND_AMAX, EXTEND_FPS)
@@ -1220,8 +1229,9 @@ class Arm:
         with self.lock:
             if move not in TAUGHT_MOVES:
                 raise ValueError(f"move must be one of {', '.join(TAUGHT_MOVES)}")
-            if type(speed) not in (int, float) or float(speed) not in TAUGHT_SPEEDS:
-                raise ValueError("speed must be 1, 1.5, or 2")
+            allowed = TAUGHT_MOVE_SPEEDS.get(move, TAUGHT_SPEEDS)
+            if type(speed) not in (int, float) or float(speed) not in allowed:
+                raise ValueError("speed must be " + ", ".join(f"{value:g}" for value in allowed))
             if self.hold is not None and self.hold.get("pose") == move:
                 raise ValueError("Stop this move before changing its speed")
             self.taught_speed[move] = float(speed)

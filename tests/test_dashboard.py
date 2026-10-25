@@ -952,6 +952,30 @@ class TaughtMoveTests(DashboardBase):
         arm.pose_start("home")
         self.assertFalse(arm.hold["staged"])
 
+    def test_bring_to_mouth_starts_gripped_moves_one_joint_and_stays_1x(self):
+        from arm_control.arm import taught_segments
+        gripped = self.offset(0, 60, -500, 200, 0, -300)
+        front = self.offset(300, 300, -200, 100, 0, -300)
+        mouth = self.offset(320, 340, -180, 120, 0, -300)
+        segments = taught_segments(gripped, [front, mouth], carrying_move=True)
+        for begin, end in segments:
+            changed = [index for index in (1, 2) if begin[index] != end[index]]
+            self.assertLessEqual(len(changed), 1, (begin, end))
+        self.assertEqual(segments[-1][1], mouth)
+        bus = TrackingBus(gripped)
+        arm = self.taught_arm(bus)
+        self.teach(arm, bus, "bring_to_mouth", [front, mouth])
+        bus.positions.update(zip(JOINT_NAMES, gripped, strict=True))
+        bus.goals = bus.positions.copy()
+        with self.assertRaisesRegex(ValueError, "speed must be 1"):
+            arm.teach_speed("bring_to_mouth", 2)
+        arm.pose_start("bring_to_mouth")
+        self.run_steps(arm)
+        self.assertIsNone(arm.error)
+        self.assertGreaterEqual(bus.goals["gripper"], mouth[5] - GRIP_HOLD_LEAD)
+        for index, name in enumerate(JOINT_NAMES[:5]):
+            self.assertLessEqual(abs(bus.positions[name] - mouth[index]), POSE_TOLERANCE, name)
+
     def test_stop_cancels_taught_move_and_holds_measured(self):
         bus = TrackingBus(self.HOME)
         arm = self.taught_arm(bus)

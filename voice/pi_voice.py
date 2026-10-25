@@ -19,7 +19,7 @@ from voice_test import ROOT, VoiceTest, normalize
 
 ROBOT_URL = "http://127.0.0.1:8765"
 MODEL = "typesafe/jev-1.14"
-TAUGHT_COMMANDS = {"lift_this", "press_button"}
+TAUGHT_COMMANDS = {"lift_this", "press_button", "bring_to_mouth"}
 COMMANDS = {"open_gripper", "close_gripper", "home", "extend", "dance",
             "stop", "cancel", "pick_up_can", "none"} | TAUGHT_COMMANDS
 POSE_COMMANDS = {"home", "extend", "dance"} | TAUGHT_COMMANDS
@@ -40,6 +40,9 @@ COMMAND_PATTERNS = {
     "lift_this": (r"(?:(?:lift|pick up|grab) (?:the )?(?:this|that|it|object|thing)(?: up)?|"
                   r"pick (?:this|that|it) up)"),
     "press_button": r"(?:press|push|hit|click) (?:the |that |a )?button",
+    "bring_to_mouth": (r"(?:(?:bring|move|hand) (?:me )?(?:the |that |this |my )?(?:can|drink|cup|it)"
+                       r"(?: up)? to (?:my )?(?:mouth|face|lips)|give me a (?:drink|sip)|"
+                       r"i (?:want|would like|d like) (?:a|to) (?:drink|sip))"),
     "stop": r"(?:stop(?: now)?|halt|freeze|emergency stop)",
     "cancel": r"(?:cancel(?: that)?|never mind)",
 }
@@ -51,6 +54,7 @@ MODEL_CUES = {
     "dance": r"\b(?:dance|jig|wiggle)\b",
     "lift_this": r"\b(?:lift|pick up|grab)\b.{0,20}\b(?:this|that|it|object|thing)\b",
     "press_button": r"\b(?:press|push|hit|click)\b.{0,15}\bbutton\b",
+    "bring_to_mouth": r"\b(?:mouth|lips|drink|sip)\b",
     "stop": r"\b(?:stop|halt|freeze)\b",
     "cancel": r"\b(?:cancel|never mind|forget that)\b",
 }
