@@ -1006,7 +1006,7 @@ class TaughtMoveTests(DashboardBase):
             lowest = min(lowest, min(bus.voltages.values()))
         self.assertIsNone(arm.hold)
         self.assertIsNone(arm.error)
-        self.assertGreaterEqual(lowest, 51)  # Stays near 5.1-5.2 V, like a manual jog.
+        self.assertGreaterEqual(lowest, 49)  # Home eases below 5.0 V, above the 4.8 V stop.
         for index, name in enumerate(JOINT_NAMES):
             self.assertLessEqual(abs(bus.positions[name] - self.HOME[index]), POSE_TOLERANCE, name)
 
@@ -1042,7 +1042,7 @@ class TaughtMoveTests(DashboardBase):
                 break
             # Hold the supply low for 3 s of the elbow stage, like a weak adapter.
             if 40 <= step < 100:
-                bus.voltages = {name: 51 for name in JOINT_NAMES}
+                bus.voltages = {name: 49 for name in JOINT_NAMES}
                 arm._advance(start + step * 0.05)
                 bus.positions["elbow_flex"] = bus.positions["elbow_flex"]
                 eased |= arm.hold is not None and arm.hold.get("ease", 1.0) < 1.0
@@ -1096,6 +1096,7 @@ class TaughtMoveTests(DashboardBase):
         arm = self.taught_arm(bus)
         arm.pose_start("home")
         start = time.monotonic()
+        arm._advance(start)  # Resting supply: 5.3 V.
         for step in range(1, 40):
             bus.voltages = {name: 50 for name in JOINT_NAMES}
             arm._advance(start + step * 0.05)
