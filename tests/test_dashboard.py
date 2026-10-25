@@ -1090,6 +1090,22 @@ class TaughtMoveTests(DashboardBase):
         self.assertIsNone(arm.error)
         self.assertLess(steps, 1500)  # Moves on; a light load at 5.1 V is not a reason to crawl.
 
+    def test_home_does_not_ease_at_5_0_v_while_taught_moves_do(self):
+        far = self.offset(-80, 1500, -720, -570, 0, 0)
+        bus = TrackingBus(far)
+        arm = self.taught_arm(bus)
+        arm.pose_start("home")
+        start = time.monotonic()
+        for step in range(1, 40):
+            bus.voltages = {name: 50 for name in JOINT_NAMES}
+            arm._advance(start + step * 0.05)
+        self.assertEqual(arm.hold.get("ease", 1.0), 1.0)  # 5.0 V: Home keeps its normal push.
+        for step in range(40, 60):
+            bus.voltages = {name: 49 for name in JOINT_NAMES}
+            arm._advance(start + step * 0.05)
+        self.assertLess(arm.hold["ease"], 1.0)  # 4.9 V: Home eases.
+        arm.pose_stop()
+
     def test_stop_cancels_taught_move_and_holds_measured(self):
         bus = TrackingBus(self.HOME)
         arm = self.taught_arm(bus)

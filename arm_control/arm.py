@@ -85,6 +85,11 @@ TAUGHT_SETTLE_TOLERANCE = 60
 # threshold follows the supply: a 5.2 V rest must not ease at every small load.
 VOLTAGE_EASE_RAW = 52
 VOLTAGE_EASE_DROP = 1
+# Home must finish from any pose. Folding the elbow against gravity alone
+# pulls a weak supply to about 5.0 V, and easing at 5.1 V left it crawling
+# (125 of 725 ticks in 43 s), so Home eases only below 5.0 V, still 0.2 V
+# above the hard stop.
+HOME_EASE_RAW = 50
 TAUGHT_EASE_MIN = 0.25
 TAUGHT_EASE_RECOVERY = 0.02  # Per control step; about 2.5 s back to full push.
 POSE_NAMES = ("home", "extend", "dance") + TAUGHT_MOVES
@@ -1294,8 +1299,9 @@ class Arm:
             low_voltage = min(snapshot[name]["voltage"] for name in JOINT_NAMES)
             if "rest_voltage" not in hold:
                 hold["rest_voltage"] = low_voltage
+            ceiling = HOME_EASE_RAW if hold["pose"] == "home" else VOLTAGE_EASE_RAW
             threshold = max(MIN_VOLTAGE_RAW + 1,
-                            min(VOLTAGE_EASE_RAW, hold["rest_voltage"] - VOLTAGE_EASE_DROP))
+                            min(ceiling, hold["rest_voltage"] - VOLTAGE_EASE_DROP))
             easing = low_voltage < threshold
             ease = hold.get("ease", 1.0)
             ease = (max(TAUGHT_EASE_MIN, ease * 0.5) if easing
