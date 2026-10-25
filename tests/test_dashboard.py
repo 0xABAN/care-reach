@@ -950,14 +950,13 @@ class TaughtMoveTests(DashboardBase):
                 break
             before = bus.positions.copy()
             arm._advance(start + step * 0.05)
-            moved = [name for name in ("shoulder_lift", "elbow_flex", "wrist_flex")
-                     if abs(bus.positions[name] - before[name]) > 2]
+            moved = [name for name in JOINT_NAMES if abs(bus.positions[name] - before[name]) > 2]
             self.assertLessEqual(len(moved), 1, f"moved together: {moved}")
             if moved and (not order or order[-1] != moved[0]):
                 order.append(moved[0])
         self.assertIsNone(arm.hold)
         self.assertIsNone(arm.error)
-        self.assertEqual(order, ["elbow_flex", "shoulder_lift", "wrist_flex"])
+        self.assertEqual(order, ["elbow_flex", "shoulder_lift", "wrist_flex", "shoulder_pan", "gripper"])
         for index, name in enumerate(JOINT_NAMES):
             self.assertLessEqual(abs(bus.positions[name] - self.HOME[index]), POSE_TOLERANCE, name)
 

@@ -178,7 +178,7 @@ def staged_segments(begin, end, order):
 # one at a time from any start. Pulling several loaded joints at once sagged the
 # supply below MIN_VOLTAGE_RAW. Elbow before shoulder also respects the
 # Extend->Home rule that the shoulder must not lead the elbow.
-HOME_ORDER = ((2,), (1,), (3,), (0, 4, 5))
+HOME_ORDER = ((2,), (1,), (3,), (0,), (4,), (5,))  # Strictly one motor at a time.
 
 
 def needs_staged_home(start, home):
