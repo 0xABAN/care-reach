@@ -1,6 +1,6 @@
 # Care Reach SO-101 follower
 
-This repository controls Lance's assembled six-motor SO-101 follower. The headless Raspberry Pi 5 (8 GB) is connected to the URT-2 board and owns the servo bus. A Mac mini is reachable from the Pi over Tailscale for later model inference.
+This repository controls Lance's assembled six-motor SO-101 follower. The headless Raspberry Pi 5 (8 GB) is connected to the URT-2 board and owns the servo bus. Motors 1→2 connect through one URT-2 connector, and motors 3→4→5→6 through another. All six respond through the same USB serial port and are addressed by servo ID. A Mac mini is reachable from the Pi over Tailscale for later model inference.
 
 ## Connect and open the dashboard
 

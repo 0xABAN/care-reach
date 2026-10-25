@@ -24,7 +24,7 @@ URT2_PORT = "/dev/serial/by-id/usb-1a86_USB_Single_Serial_5B79078563-if00"
 
 
 def build_motors() -> dict[str, Any]:
-    """The six SO-101 motors in bus order; the gripper is normalized 0..100."""
+    """The six SO-101 motors in servo ID order; the gripper is normalized 0..100."""
     from lerobot.motors import Motor, MotorNormMode
 
     return {
