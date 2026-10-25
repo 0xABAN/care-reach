@@ -1,6 +1,5 @@
 [Unit]
 Description=Care Reach SO-101 dashboard (Pi-owned serial bus)
-After=default.target
 
 [Service]
 Type=simple

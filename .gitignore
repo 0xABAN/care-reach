@@ -6,3 +6,6 @@ __pycache__/
 
 # Local voice transcripts and diagnostics
 voice/reports/
+
+# Per-arm taught motion samples live outside Git
+taught_moves.json
