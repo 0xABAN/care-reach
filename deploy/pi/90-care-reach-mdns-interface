@@ -1,0 +1,32 @@
+#!/bin/sh
+# Advertise the reachable LAN interface as pi.local when Ethernet and Wi-Fi
+# share one subnet. NetworkManager calls this on interface state changes.
+set -eu
+
+case "${1:-}" in
+    eth0|wlan0|manual) ;;
+    *) exit 0 ;;
+esac
+
+case "${2:-}" in
+    up|down|dhcp4-change|dhcp6-change|manual) ;;
+    *) exit 0 ;;
+esac
+
+if [ "$(cat /sys/class/net/eth0/carrier 2>/dev/null || true)" = 1 ] &&
+    /usr/bin/ip -4 -o address show dev eth0 scope global | /usr/bin/grep -q .; then
+    wanted=eth0
+elif /usr/bin/ip -4 -o address show dev wlan0 scope global | /usr/bin/grep -q .; then
+    wanted=wlan0
+else
+    exit 0
+fi
+
+config=/etc/avahi/avahi-daemon.conf
+current=$(/usr/bin/sed -n 's/^allow-interfaces=//p' "$config" | /usr/bin/head -n 1)
+[ "$current" = "$wanted" ] && exit 0
+
+# The stock Pi config contains one commented allow-interfaces line. Change
+# that line only, leaving all other Avahi settings intact.
+/usr/bin/sed -i "s/^#\{0,1\}allow-interfaces=.*/allow-interfaces=$wanted/" "$config"
+/usr/bin/systemctl try-restart avahi-daemon.service
