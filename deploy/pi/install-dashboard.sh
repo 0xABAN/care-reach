@@ -6,7 +6,8 @@ if [[ $(id -un) != robot ]]; then
   exit 1
 fi
 
-repo=/home/robot/worktrees/care-reach/pi-runtime
+repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+venv=/home/robot/worktrees/care-reach/pi-runtime/.venv
 source_dir=/home/robot/worktrees/care-reach/lerobot-runtime-src
 port=/dev/serial/by-id/usb-1a86_USB_Single_Serial_5B79078563-if00
 calibration=/home/robot/.cache/huggingface/lerobot/calibration/robots/so_follower/care_reach_follower.json
@@ -14,7 +15,7 @@ unit_name=care-reach-dashboard.service
 unit_source="$repo/deploy/pi/$unit_name"
 unit_destination="$HOME/.config/systemd/user/$unit_name"
 
-for path in "$repo/server.py" "$repo/joint_settings.json" "$repo/folded_pose.json" "$repo/.venv/bin/python" "$calibration" "$unit_source" "$port"; do
+for path in "$repo/server.py" "$repo/joint_settings.json" "$repo/folded_pose.json" "$venv/bin/python" "$calibration" "$unit_source" "$port"; do
   if [[ ! -e $path ]]; then
     echo "Required dashboard dependency missing: $path" >&2
     exit 1
