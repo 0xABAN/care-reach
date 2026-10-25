@@ -911,6 +911,7 @@ class TaughtMoveTests(DashboardBase):
         for speed in (1, 2):
             bus = TrackingBus(self.HOME)
             arm = self.taught_arm(bus)
+            arm.teach_clear("press_button")  # Both runs share one saved file.
             self.teach(arm, bus, "press_button", [far, self.HOME])
             arm.teach_speed("press_button", speed)
             arm.pose_start("press_button")
