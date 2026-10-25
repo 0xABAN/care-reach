@@ -1,7 +1,5 @@
 [Unit]
 Description=Care Reach voice transcription and command service
-After=care-reach-dashboard.service
-Wants=care-reach-dashboard.service
 
 [Service]
 Type=simple
