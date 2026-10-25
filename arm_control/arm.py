@@ -45,6 +45,8 @@ GRIP_HOLD_LEAD = 30  # Small closing preload after a normal release or lost hear
 MIN_VOLTAGE_RAW = 48
 MAX_LOAD = 900
 POSITION_TOLERANCE = 15
+SINGLE_MOTOR_GRIP_HOLD_TOLERANCE = GRIP_HOLD_LEAD + 5
+SINGLE_MOTOR_SETTLE_SAMPLE_SECONDS = 0.05
 POSE_STEP_SECONDS = 0.06
 POSE_MAX_LEAD = 80
 POSE_TOLERANCE = 35
@@ -139,6 +141,7 @@ class Arm:
         self.bounds = SafetyBounds.from_files(self.settings_path, self.calibration_path)
         self.park_bounds = folded_bounds(home_bounds(self.bounds, self.home), self.folded)
         self.hold = None
+        self.single_motor_mode = False
         self.error = None
         self.closed = False
         self.clock = clock if clock is not None else MonotonicClock()
@@ -474,8 +477,10 @@ class Arm:
                 "motors": motors, "holding": self.hold["motor"] if self.hold else None,
                 "error": self.error, "motion_enabled": any(m["motion_enabled"] for m in motors),
                 "recent_events": list(self.telemetry.recent)[-8:],
-                "pose_enabled": all(m["motion_enabled"] for m in motors),
-                "hold_all_enabled": not all(m["torque"] for m in motors) and not any(m["fault"] for m in motors),
+                "single_motor_mode": self.single_motor_mode,
+                "pose_enabled": not self.single_motor_mode and all(m["motion_enabled"] for m in motors),
+                "hold_all_enabled": not self.single_motor_mode and not all(m["torque"] for m in motors)
+                                    and not any(m["fault"] for m in motors),
                 "extended_ticks": dict(zip(JOINT_NAMES, self.extended, strict=True)),
                 "taught_moves": {name: len(steps) for name, steps in self.taught.items()},
                 "pose": {
@@ -504,11 +509,55 @@ class Arm:
                 for index, name in enumerate(JOINT_NAMES, 1)
             }
 
+    def _require_stopped_motors(self, *, except_motor=None):
+        """Reject a new owner while another servo has pending or reported motion.
+
+        A gripper holding an object can retain its bounded closing preload even
+        while stationary. Other joints must be near their last commanded goals.
+        This check only reads registers and never changes torque or goals.
+        """
+        first_positions = None
+        for sample in range(2):
+            moving = self._read("Moving")
+            positions = self._read("Present_Position")
+            goals = self._read("Goal_Position")
+            for motor, name in enumerate(JOINT_NAMES, 1):
+                if motor == except_motor:
+                    continue
+                tolerance = (SINGLE_MOTOR_GRIP_HOLD_TOLERANCE if motor == 6
+                             else POSITION_TOLERANCE)
+                if (moving[name] != 0 or abs(goals[name] - positions[name]) > tolerance
+                        or (first_positions is not None
+                            and abs(positions[name] - first_positions[name]) > 1)):
+                    raise ValueError(
+                        f"Motor {motor} is still moving or has an unsettled goal; "
+                        "wait for it to stop before moving another motor"
+                    )
+            if sample == 0:
+                first_positions = positions
+                time.sleep(SINGLE_MOTOR_SETTLE_SAMPLE_SECONDS)
+
+    def set_single_motor_mode(self, enabled: bool):
+        """Select single-joint controls only, with no implicit motor writes."""
+        if type(enabled) is not bool:
+            raise ValueError("single_motor_mode must be a boolean")
+        with self.lock:
+            if self.hold is not None:
+                raise ValueError("Stop the active movement before changing single-motor mode")
+            if enabled and not self.single_motor_mode:
+                self._require_stopped_motors()
+            self.single_motor_mode = enabled
+            self.telemetry.write("single_motor_mode_changed", enabled=enabled,
+                                 snapshot=self.last_snapshot)
+            return {"single_motor_mode": enabled}
+
     def start(self, motor, direction):
         with self.lock:
             if self.hold is not None and self.hold["mode"] == "pose":
                 raise ValueError("A pose move is in progress; cancel it before jogging")
             self._stop()
+            if self.single_motor_mode:
+                self._require_stopped_motors(except_motor=motor)
             snapshot = self._snapshot()
             self._check_snapshot(snapshot, moving_motor=motor)
             name = JOINT_NAMES[motor - 1]
@@ -530,6 +579,8 @@ class Arm:
             if type(target) is not int:
                 raise ValueError("Target must be an integer tick")
             self._stop()
+            if self.single_motor_mode:
+                self._require_stopped_motors(except_motor=6)
             snapshot = self._snapshot()
             self._check_snapshot(snapshot, moving_motor=6)
             position = snapshot["gripper"]["position"]
@@ -545,6 +596,8 @@ class Arm:
 
     def pose_start(self, pose):
         with self.lock:
+            if self.single_motor_mode:
+                raise ValueError("Multi-joint poses are unavailable in single-motor mode; turn it off first")
             if self.hold is not None:
                 raise ValueError("A movement is already active; cancel it before starting a pose move")
             if pose not in POSE_NAMES:
@@ -929,6 +982,8 @@ class Arm:
 
     def hold_all(self):
         with self.lock:
+            if self.single_motor_mode:
+                raise ValueError("Hold all joints is unavailable in single-motor mode; turn it off first")
             if self.hold is not None and self.hold["mode"] == "pose":
                 raise ValueError("A pose move is in progress; cancel it before holding all joints")
             self._stop()

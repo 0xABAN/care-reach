@@ -16,6 +16,8 @@ From the Pi checkout, `bash deploy/pi/install-dashboard.sh` installs a systemd u
 
 Before opening the servo bus from another program, stop the dashboard with `systemctl --user stop care-reach-dashboard.service` on the Pi. Start it afterward with `systemctl --user start care-reach-dashboard.service`. No two programs should open the URT-2 at once. The dashboard and motion runtime preserve torque when they stop; they do not provide an automatic torque-release command.
 
+The dashboard's **Single motor** switch is off when the dashboard starts. While it is on, the panel allows one joint jog or gripper go-to-tick command at a time. It will not switch to another joint until the previous joint has settled. You can still save a taught step while the arm is idle. Home, Extend, Dance, taught move playback, and Hold all are unavailable in this mode because they use coordinated joints. Turn the switch off after movement stops to use those commands again. This switch limits commanded movement; powered joints still hold position and can make small corrections under load. The setting lives in the dashboard process and resets to off after a restart. The same mode is available through `POST /api/movement/mode` with a JSON body such as `{"single_motor_mode":true}` and is reported by `GET /api/state`.
+
 The public dataset and checkpoint described in `research/open_so101_motion/` are not deployed on this Pi. Model inference can run on the Mac mini via the Pi's Tailscale connection after cameras and a task policy are validated.
 
 ## Live handoff check (2026-10-24)

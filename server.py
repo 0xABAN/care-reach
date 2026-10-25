@@ -222,6 +222,10 @@ def handler_for(arm, port):
                         logging.warning("Voice service unavailable: %s", type(exc).__name__)
                         self.reply(503, {"error": "Transcription service unavailable"})
                         return
+                elif path == "/api/movement/mode":
+                    if set(data) != {"single_motor_mode"} or type(data["single_motor_mode"]) is not bool:
+                        raise ValueError("single_motor_mode must be boolean")
+                    result = arm.set_single_motor_mode(data["single_motor_mode"])
                 elif path == "/api/hold/start":
                     motor = motor_id(data.get("motor"))
                     direction = data.get("direction")
