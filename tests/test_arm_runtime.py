@@ -1,8 +1,12 @@
 """Fake-bus checks only; this test suite never opens a serial device."""
 
+import tempfile
 import unittest
+from pathlib import Path
 
-from arm_runtime import ArmRuntime, ArmSafetyError
+from arm_control.bus import BusOwnership
+from arm_control.bus_lock import BusBusyError, BusLock
+from arm_control.runtime import ArmRuntime, ArmSafetyError
 from motion_core import JOINT_NAMES, SafetyBounds, UnsafePoseError
 
 
@@ -241,6 +245,73 @@ class RuntimeTests(unittest.TestCase):
             ArmRuntime("unused", BOUNDS, bus_factory=lambda _: bus).run([(2000,) * 6])
         self.assertEqual(bus.disconnects, [False])
         self.assertEqual(bus.writes, [])  # Goal_Position is unsafe in PWM mode.
+
+    def test_result_carries_measured_bus_and_compute_windows(self):
+        bus = FakeBus("unused")
+        result = ArmRuntime("unused", BOUNDS, bus_factory=lambda _: bus).run(
+            [(2000,) * 6] * 4, fps=50
+        )
+        timing = result["timing"]
+        for field in ("bus_read_ms", "bus_write_ms", "compute_ms", "cycle_ms"):
+            window = timing[field]
+            self.assertIsInstance(window, dict, field)
+            self.assertGreater(window["count"], 0, field)
+            self.assertGreater(window["max_ms"], 0, field)
+            self.assertLessEqual(window["mean_ms"], window["max_ms"] + 1e-9, field)
+        self.assertLessEqual(timing["compute_ms"]["mean_ms"], timing["cycle_ms"]["mean_ms"] + 1e-9)
+        self.assertEqual(bus.disconnects, [False])
+
+    def test_injected_bus_factory_skips_the_default_lock(self):
+        ownership = BusOwnership("unused", bus_factory=lambda _: FakeBus("unused"))
+        self.assertIsNone(ownership.lock)
+
+    def test_explicit_lock_is_released_after_run_and_close(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "arm-bus.lock"
+            lock = BusLock(path)
+            bus = FakeBus("unused")
+            result = ArmRuntime("unused", BOUNDS, bus_factory=lambda _: bus, bus_lock=lock).run(
+                [(2000,) * 6]
+            )
+            self.assertEqual(result["frames_commanded"], 1)
+            self.assertFalse(lock.locked)
+            next_owner = BusLock(path)
+            next_owner.acquire("next-owner")
+            self.assertTrue(next_owner.locked)
+            next_owner.release()
+
+    def test_second_owner_gets_a_clear_busy_error_before_connect(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "arm-bus.lock"
+            holder = BusLock(path)
+            holder.acquire("other-process")
+            self.addCleanup(holder.release)
+            bus = FakeBus("unused")
+            with self.assertRaisesRegex(BusBusyError, "owned by another process"):
+                ArmRuntime("unused", BOUNDS, bus_factory=lambda _: bus, bus_lock=BusLock(path)).run(
+                    [(2000,) * 6]
+                )
+            self.assertFalse(bus.connected)
+            self.assertEqual(bus.writes, [])
+
+    def test_partial_connect_failure_disconnects_before_releasing_lock(self):
+        class PartiallyConnectedBus(FakeBus):
+            def connect(self, handshake=True):
+                self.connected = True
+                raise OSError("handshake failed")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "arm-bus.lock"
+            lock = BusLock(path)
+            bus = PartiallyConnectedBus("unused")
+            ownership = BusOwnership("unused", bus_factory=lambda _: bus, bus_lock=lock)
+            with self.assertRaisesRegex(OSError, "handshake failed"):
+                ownership.connect()
+            self.assertEqual(bus.disconnects, [False])
+            self.assertFalse(lock.locked)
+            next_owner = BusLock(path)
+            next_owner.acquire("next-owner")
+            next_owner.release()
 
 
 if __name__ == "__main__":

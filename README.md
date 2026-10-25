@@ -20,6 +20,36 @@ The Pi records timestamped motor positions, goals, voltage, status, load, temper
 
 When a closing gripper jog ends normally or loses its heartbeat, the controller keeps a closing goal no more than 30 ticks inside its measured position, rather than replacing it with the measured position and letting the jaws rebound. A closing go-to-tick retains its target when it reaches it. A servo fault still ends the move with a measured-position hold, and the gripper should not be used to hold a critical load until its force and power delivery have been tested with that object.
 
+## Movement library
+
+The importable `arm_control/` package owns motor communication and movement. Its modules have separate jobs:
+
+- `arm.py` runs dashboard jogs, go-to-tick, Home, Fold, and Dance with the existing safety checks.
+- `runtime.py` (`ArmRuntime`), `pose_runner.py` (`MeasuredPoseRunner`), `home.py`, and `shake.py` (`WristShake`) run the direct movement routines.
+- `bus.py` builds the six STS3215 motors and manages exclusive bus ownership.
+
+`server.py` now handles HTTP and the camera feed. It re-exports `Arm`, `find_port`, and tuning constants for existing callers. `motion_core.py` remains an offline planner with no hardware access.
+
+Each real connection holds a nonblocking lock at `~/.local/state/care-reach/arm-bus.lock` until it disconnects. A standalone program gets a busy error if the dashboard already owns the bus. Fake buses used in tests skip the default lock; a caller that explicitly supplies a `BusLock` still uses it.
+
+Timing uses `time.perf_counter_ns`, so changes to the wall clock do not affect durations. Dashboard logs still have UTC timestamps. Records for one motion share a `token`; stop, completion, and error records include timing measured so far. Long motions also log a `timing_sample` about every five seconds. Duration windows report `count`, `mean_ms`, and `max_ms`:
+
+| Field | Meaning |
+| --- | --- |
+| `first_command_ms` | From motion start to submission of its first goal write. This does not measure when the motor starts moving. |
+| `bus_read_ms` | Time spent completing serial register reads. |
+| `bus_write_ms` | Time for a serial write call to return. Addressed writes may wait for an acknowledgement; sync writes do not. This is not physical actuator latency. |
+| `compute_ms` | Python controller time per control cycle outside measured serial calls, including safety checks and telemetry. |
+| `cycle_ms` | Total elapsed time spent executing a control cycle. |
+| `schedule_lag_ms` | How late a cycle starts past its scheduled time. |
+| `settle_ms` | Time from starting a pose move until encoder readings reach the target tolerance; present on completed poses. |
+| `motion_elapsed_ms` | Time from start to stop for a stopped motion. |
+| `stop_command_ms` | Time spent reading feedback and issuing the final holding goal during stop. |
+
+Direct runners return bus and compute timing windows without persistent telemetry. The Home, Fold, Dance, and wrist trial commands print a short summary after a completed run.
+
+`home.py` and `shake_it_crazy_style.py` are command-line wrappers around the library. `dance_demo.py` and `park.py` keep their offline planners and call library runners for `--execute`. Existing imports of `arm_runtime.py` and `measured_pose_runner.py` still work. Stop the dashboard before a standalone hardware run so only one program controls the arm.
+
 The USB camera's [live feed](docs/CAMERA.md) appears in the dashboard's **Camera** tab at the same dashboard address. The camera service stays on Pi localhost; the dashboard relays the feed to anyone who can reach the panel.
 
 ## Pose names
@@ -35,7 +65,7 @@ See [pose definitions and limits](docs/POSES.md). Folded was captured with torqu
 
 ## Motion
 
-`motion_core.py` plans bounded synchronized trajectories. `arm_runtime.py` checks measured position, torque, mode, fault status, voltage, load, software limits, and firmware limits, and leaves torque enabled on exit. `measured_pose_runner.py` moves from an in-bounds measured pose with bounded position lead. Motor order is 1 shoulder pan, 2 shoulder lift, 3 elbow flex, 4 wrist flex, 5 wrist roll, 6 gripper.
+`motion_core.py` plans bounded synchronized trajectories. `arm_control/runtime.py` (still importable as `arm_runtime`) checks measured position, torque, mode, fault status, voltage, load, software limits, and firmware limits, and leaves torque enabled on exit. `arm_control/pose_runner.py` (still importable as `measured_pose_runner`) moves from an in-bounds measured pose with bounded position lead. Motor order is 1 shoulder pan, 2 shoulder lift, 3 elbow flex, 4 wrist flex, 5 wrist roll, 6 gripper.
 
 [`so101_ik.py`](so101_ik.py) translates this arm's calibrated encoder ticks to the official SO-101 model's joint degrees and provides guarded local FK/IK. See [kinematics setup and live validation](docs/KINEMATICS.md). Cartesian targets are still experimental; the dashboard's Home and Fold use validated tick poses.
 
