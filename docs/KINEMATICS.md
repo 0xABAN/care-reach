@@ -18,16 +18,57 @@ rounds to the nearest raw tick. The five midpoints differ: at the robot's
 zero. The gripper remains a raw tick and is not an IK joint; its URDF joint
 does not encode LeRobot's gripper-percent mapping.
 
-For a small Cartesian translation, the adapter starts from measured encoder
-ticks, computes FK, shifts only the tool position, and asks LeRobot/PlaCo for
-IK with position weight 1 and orientation weight 0.01. It then converts the
-result back to ticks and rejects nonfinite answers, model residual over 3 mm,
-steps longer than 30 mm, any arm joint jump over 250 ticks, or a goal outside
-the arm's saved soft bounds. It never silently clips a solution. Run each
-accepted joint target through the live measured-motion controller as well;
-that controller checks firmware limits, load, fault, voltage, torque, and
-progress while moving. Only one process may own the URT-2 bus. Stop the
-dashboard service before a direct-serial test and restart it afterward.
+The named tool point is the URDF's `gripper_frame_link` by default. A caller
+can select another frame with `tool_frame_name` if that frame exists in the
+model. Its XYZ coordinates are in the URDF base frame, not camera coordinates.
+This is the nominal model point; the real point between the gripper jaws has
+not been measured.
+
+`SO101Kinematics.solve_xyz(start_ticks, target_xyz_m)` solves one nearby
+**absolute** XYZ request in that base frame. `translate(start_ticks,
+delta_xyz_m)` remains available for relative steps. Both use position-only IK
+by default (`orientation_weight=0`), seeded from the supplied encoder ticks.
+They round the solution to real encoder ticks, compute FK again at those
+rounded ticks, and reject a model residual over 3 mm. A single request is
+limited to 30 mm of Cartesian travel and 250 ticks per arm joint. Invalid
+numbers, calibration ranges, unsafe joint targets, and large solution jumps
+are rejected. The gripper tick is preserved.
+
+`plan_xyz(start_ticks, target_xyz_m)` divides a straight model-space line
+into nearby candidate waypoints. Its default total-path limit is 150 mm,
+with at most 12 waypoints. Each waypoint passes the same limits as
+`solve_xyz`. An optional `validate_waypoint(previous_ticks, next_ticks)`
+callback checks one leg; `validate_plan(start_ticks, waypoint_ticks)` can
+check the complete candidate path. Apply the movement policy to the complete
+path, because a path that moves motor 2 first and other joints later is still
+disallowed in motor-2-isolated mode. For example, after planning:
+
+```python
+from arm_control.movement_policy import validate_movement_path
+
+validate_movement_path(
+    mode, plan.start_ticks, [step.target_ticks for step in plan.waypoints]
+)
+```
+
+The returned `XYZPlan` holds the requested XYZ, each candidate joint pose,
+and the final **model-predicted** XYZ. These calls have no hardware access.
+They do not check collisions or the swept joint path between waypoints, and
+they cannot tell whether the physical gripper reached the point.
+
+Use the published URDF and existing LeRobot calibration as the first FK
+estimate. Measuring every link is unnecessary for that first pass. If we
+need to know the real XYZ error, we still need at least a few independent
+observations of the gripper point at varied poses, such as a calibrated
+fixed camera looking at a marker or a small fixture with known points.
+Encoder-based FK alone checks the model against itself. Keep observations
+used to tune any zero or tool-frame offset separate from those used to check
+the result.
+
+Before any planned waypoint is sent to hardware, a live controller must
+validate the full motion path and monitor firmware limits, load, status,
+voltage, torque, and progress. Only one process may own the URT-2 bus. Stop
+the dashboard service before a direct-serial test and restart it afterward.
 Neither operation releases torque.
 
 For Cartesian trials, use `MeasuredPoseRunner.move(..., tolerance=15,
@@ -38,14 +79,14 @@ the holding goal. A runner stop or fault still holds measured position. Check
 the measured FK result after every leg, since a solved model pose is not proof
 that the servos reached it.
 
-`orientation_weight=0` is available for position-only exploratory steps. Near
-Home, the official 0.01 orientation weight made a 20 mm Z request use large,
-opposing elbow and wrist changes; position-only IK produced a much shorter
-joint move. This setting does not hold the tool angle, so use the orientation
-constraint for tasks that require one. Feedback corrections also need a
-regularized or waypoint-aware solver: repeated Z corrections in the first
-live trial did not converge below about 8 mm and eventually reached the
-joint-jump guard. No automatic Cartesian correction loop is enabled.
+Near Home, the earlier 0.01 orientation weight made a 20 mm Z request use
+large, opposing elbow and wrist changes; position-only IK produced a much
+shorter joint move. Position-only IK does not hold the tool angle, so use an
+explicit nonzero orientation weight for tasks that require one. Feedback
+corrections also need a regularized or waypoint-aware solver: repeated Z
+corrections in the first live trial did not converge below about 8 mm and
+eventually reached the joint-jump guard. No automatic Cartesian correction
+loop is enabled.
 
 ## Live validation, 2026-10-24
 

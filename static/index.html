@@ -28,8 +28,9 @@
     .release:hover { background: #88373d; }
     .transcription { background: #263841; border-color: #6f93c0; font-weight: 700; white-space: nowrap; }
     .transcription[aria-checked="true"] { background: #197f86; border-color: #7ed7dc; }
-    .single-motor { background: #263841; border-color: #6f93c0; font-weight: 700; white-space: nowrap; }
-    .single-motor[aria-checked="true"] { background: #197f86; border-color: #7ed7dc; }
+    .mode-control { display: grid; gap: 3px; color: #aebec7; font-size: .8rem; font-weight: 700; }
+    .mode-control select { min-height: 41px; padding: 7px 9px; border: 1px solid #6f93c0; border-radius: 9px; background: #263841; color: #f2f7f9; font: inherit; }
+    .mode-control select:disabled { opacity: .45; }
     .movement-mode-note { margin: -8px 0 16px; font-size: .9rem; }
     .voice-status { margin: -8px 0 16px; font-size: .9rem; }
     .teach { margin: 0 0 16px; padding: 12px 14px; border: 1px solid #33454f; border-radius: 12px; background: #1c2a32; }
@@ -87,10 +88,10 @@
     <section id="controls-panel" role="tabpanel" aria-labelledby="tab-controls">
     <div class="top">
       <div><h1>SO-101 Joint Control</h1><p class="subtitle muted">Hold a direction to move any joint. Release to hold its measured position.</p><p class="subtitle muted" id="extended-pose"></p></div>
-      <div class="top-actions"><button class="transcription" id="transcription-toggle" role="switch" aria-checked="false" disabled>Transcription: checking…</button><button class="single-motor" id="single-motor-toggle" role="switch" aria-checked="false" aria-describedby="movement-mode-note" disabled>Single motor: checking…</button><button class="pose" id="pose-home">Home / Retract</button><button class="pose" id="pose-extend">Extend</button><button class="pose" id="pose-dance">Dance</button><button class="pose" id="pose-press_button">Press button</button><button class="pose" id="pose-lift_this">Lift this</button><button class="hold-all" id="hold-all">Hold all joints</button><button class="release" id="release" disabled title="Torque release is unavailable">Torque release unavailable</button></div>
+      <div class="top-actions"><button class="transcription" id="transcription-toggle" role="switch" aria-checked="false" disabled>Transcription: checking…</button><label class="mode-control" for="movement-mode">Movement mode<select id="movement-mode" aria-describedby="movement-mode-note" disabled><option value="coordinated">Coordinated</option><option value="shoulder_isolated">Motor 2 isolated</option><option value="single_joint">Single joint</option></select></label><button class="pose" id="pose-home">Home / Retract</button><button class="pose" id="pose-extend">Extend</button><button class="pose" id="pose-dance">Dance</button><button class="pose" id="pose-press_button">Press button</button><button class="pose" id="pose-lift_this">Lift this</button><button class="hold-all" id="hold-all">Hold all joints</button><button class="release" id="release" disabled title="Torque release is unavailable">Torque release unavailable</button></div>
     </div>
     <p id="voice-status" class="voice-status muted" role="status">Checking voice service…</p>
-    <p id="movement-mode-note" class="movement-mode-note muted">Single motor mode allows jog and gripper go-to-tick. You can still save a taught step while the arm is idle. Home, Extend, Dance, taught playback, and Hold all are disabled because they use several joints. Other powered joints still hold their positions and may make small corrections under load.</p>
+    <p id="movement-mode-note" class="movement-mode-note muted">Coordinated mode runs group moves. Motor 2 isolated lets the other joints move together, or motor 2 move alone. Saved moves are available only when their whole path fits that rule; Home, Extend, and Dance need coordinated mode. Single joint mode allows one joint at a time. You can save taught steps while the arm is idle in any mode. The servos stay powered to hold position, and motor 2 can still have a voltage dip when it moves alone.</p>
     <div id="status" class="status">Connecting to the arm…</div>
     <details class="teach" id="teach">
       <summary>Teach moves</summary>
@@ -270,8 +271,8 @@
     let rowsBuilt = false;
     let lastState = null;
     const transcriptionToggle = document.getElementById('transcription-toggle');
-    const singleMotorToggle = document.getElementById('single-motor-toggle');
-    let singleMotorBusy = false;
+    const movementModeSelect = document.getElementById('movement-mode');
+    let movementModeBusy = false;
     const voiceStatus = document.getElementById('voice-status');
     let transcriptionEnabled = null;
     let transcriptionBusy = false;
@@ -311,24 +312,26 @@
       }
     });
 
-    singleMotorToggle.addEventListener('click', async () => {
-      if (singleMotorBusy || !lastState) return;
+    movementModeSelect.addEventListener('change', async () => {
+      if (movementModeBusy || !lastState) return;
       if (press || lastState.holding !== null || (lastState.pose && lastState.pose.active)) {
-        show('Stop the current movement before changing single motor mode.', true);
+        movementModeSelect.value = lastState.movement_mode;
+        show('Stop the current movement before changing modes.', true);
         return;
       }
-      singleMotorBusy = true;
-      singleMotorToggle.disabled = true;
+      movementModeBusy = true;
+      movementModeSelect.disabled = true;
       try {
-        const result = await api('/api/movement/mode', {single_motor_mode: !lastState.single_motor_mode});
+        const result = await api('/api/movement/mode', {movement_mode: movementModeSelect.value});
         await refresh();
-        show(`Single motor mode ${result.single_motor_mode ? 'on' : 'off'}.`);
+        show(`Movement mode: ${result.movement_mode.replaceAll('_', ' ')}.`);
       } catch (error) {
         await refresh();
+        if (lastState) movementModeSelect.value = lastState.movement_mode;
         show(error.message, true);
       } finally {
-        singleMotorBusy = false;
-        if (lastState) singleMotorToggle.disabled = lastState.holding !== null || Boolean(lastState.pose && lastState.pose.active);
+        movementModeBusy = false;
+        if (lastState) movementModeSelect.disabled = lastState.holding !== null || Boolean(lastState.pose && lastState.pose.active);
       }
     });
 
@@ -412,9 +415,8 @@
         const state = await response.json();
         if (!response.ok) throw new Error(state.error || 'Could not read arm');
         lastState = state;
-        singleMotorToggle.setAttribute('aria-checked', String(state.single_motor_mode === true));
-        singleMotorToggle.textContent = `Single motor: ${state.single_motor_mode ? 'On' : 'Off'}`;
-        singleMotorToggle.disabled = singleMotorBusy || state.holding !== null || Boolean(state.pose && state.pose.active);
+        if (!movementModeBusy) movementModeSelect.value = state.movement_mode || (state.single_motor_mode ? 'single_joint' : 'coordinated');
+        movementModeSelect.disabled = movementModeBusy || state.holding !== null || Boolean(state.pose && state.pose.active);
         const history = document.getElementById('fault-history');
         const events = (state.recent_events || []).filter(event =>
           ['status_changed', 'voltage_threshold_changed', 'motion_error', 'voltage_recovered'].includes(event.event));
@@ -465,36 +467,42 @@
         const homeBtn = document.getElementById('pose-home');
         const extendBtn = document.getElementById('pose-extend');
         const danceBtn = document.getElementById('pose-dance');
+        const poseAvailable = name => state.pose_available ? Boolean(state.pose_available[name]) : Boolean(state.pose_enabled);
         for (const button of document.querySelectorAll('.pose')) {
-          button.title = state.single_motor_mode ? 'Turn off single motor mode to run a coordinated move' : '';
+          button.title = (state.movement_mode || 'coordinated') !== 'coordinated' && !poseAvailable(button.id.slice(5)) ?
+            'This move needs coordinated mode or a path that keeps motor 2 still' : '';
         }
-        homeBtn.disabled = !state.pose_enabled || (poseActive && pose.name !== 'home');
-        extendBtn.disabled = !state.pose_enabled || (poseActive && pose.name !== 'extend');
-        danceBtn.disabled = !state.pose_enabled || (poseActive && pose.name !== 'dance');
+        const poseDisabled = name => poseActive && pose.name === name ? false :
+          !poseAvailable(name) || poseActive;
+        homeBtn.disabled = poseDisabled('home');
+        extendBtn.disabled = poseDisabled('extend');
+        danceBtn.disabled = poseDisabled('dance');
         homeBtn.classList.toggle('active', poseActive && pose.name === 'home');
         extendBtn.classList.toggle('active', poseActive && pose.name === 'extend');
         danceBtn.classList.toggle('active', poseActive && pose.name === 'dance');
         for (const move of ['press_button', 'lift_this']) {
           const steps = (state.taught_moves || {})[move] || 0;
           const button = document.getElementById(`pose-${move}`);
-          button.disabled = !state.pose_enabled || !steps || (poseActive && pose.name !== move);
+          button.disabled = !steps || poseDisabled(move);
           button.classList.toggle('active', poseActive && pose.name === move);
           const row = document.querySelector(`.teach-row[data-move="${move}"]`);
           row.querySelector('.steps').textContent = `${steps} step${steps === 1 ? '' : 's'}`;
-          row.querySelector('.save').disabled = poseActive || state.holding !== null || (!state.pose_enabled && !state.single_motor_mode);
+          row.querySelector('.save').disabled = poseActive || state.holding !== null || !state.motors.every(m => m.motion_enabled);
           row.querySelector('.clear').disabled = !steps || (poseActive && pose.name === move);
         }
         document.getElementById('hold-all').disabled = !state.hold_all_enabled || poseActive;
-        document.getElementById('hold-all').title = state.single_motor_mode ? 'Turn off single motor mode to hold all joints' : '';
+        document.getElementById('hold-all').title = (state.movement_mode || 'coordinated') !== 'coordinated' ? 'Select coordinated mode to hold all joints' : '';
         if (state.error) show(state.error, true);
         else if (poseActive) show(`${pose.name === 'dance' ? 'Dancing' : `Moving to ${pose.name}`} · ${Math.round(pose.progress * 100)}% · press ${pose.name} again to cancel`);
         else if (faulted.length) show(`Motor${faulted.length > 1 ? 's' : ''} ${faulted.join(', ')} faulted · healthy joints can still jog; group poses are paused.`, true);
         else if (state.holding === 6 && !press) show('Motor 6 moving to target');
         else if (!press) show(state.motion_enabled ?
-          (state.single_motor_mode ? 'Single motor mode · jog one joint at a time' : 'Joints ready · release a direction to hold position') :
-          (state.single_motor_mode ? 'Torque is off · turn off single motor mode before using Hold all joints' : 'Torque is off · use Hold all joints to enable movement'));
+          (state.movement_mode === 'single_joint' ? 'Single joint mode · jog one joint at a time' :
+           state.movement_mode === 'shoulder_isolated' ? 'Motor 2 isolated · it moves alone while other joints can move together' :
+           'Joints ready · release a direction to hold position') :
+          (state.movement_mode !== 'coordinated' ? 'Torque is off · select coordinated mode before using Hold all joints' : 'Torque is off · use Hold all joints to enable movement'));
         else show(`Moving motor ${press.motor} · release to stop`);
-      } catch (error) { singleMotorToggle.disabled = true; show(error.message, true); endPress(); }
+      } catch (error) { movementModeSelect.disabled = true; show(error.message, true); endPress(); }
     }
     async function togglePose(name) {
       endPress();

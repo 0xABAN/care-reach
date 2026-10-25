@@ -30,6 +30,11 @@ class BrokenModel(LinearModel):
         return np.full(5, np.nan)
 
 
+class StuckModel(LinearModel):
+    def inverse_kinematics(self, current, target, **kwargs):
+        return np.asarray(current, dtype=float)
+
+
 class KinematicsTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -82,6 +87,102 @@ class KinematicsTests(unittest.TestCase):
         data["wrist_roll"]["drive_mode"] = 1
         self.calibration.write_text(json.dumps(data))
         with self.assertRaises(IKError):
+            self.make()
+
+    def test_absolute_xyz_is_position_focused_and_preserves_gripper(self):
+        solver = self.make()
+        start = (2000, 2000, 2000, 2000, 2000, 1760)
+        start_xyz = np.asarray(solver.predicted_xyz(start))
+        requested = tuple(start_xyz + np.array((0.01, -0.005, 0.015)))
+        result = solver.solve_xyz(start, requested)
+        self.assertEqual(result.start_ticks, start)
+        self.assertEqual(result.target_ticks[5], start[5])
+        self.assertEqual(result.target_xyz_m, requested)
+        self.assertLess(result.residual_mm, 0.5)
+        self.assertEqual(solver.model.ik_options["orientation_weight"], 0.0)
+        self.assertEqual(solver.solve_xyz(start, tuple(start_xyz)).target_ticks, start)
+
+    def test_nominal_frame_is_explicit(self):
+        solver = SO101Kinematics(self.calibration, self.urdf, self.bounds,
+                                 kinematics_factory=LinearModel,
+                                 tool_frame_name="test_tool_point")
+        self.assertEqual(solver.tool_frame_name, "test_tool_point")
+        self.assertEqual(solver.model.kwargs["target_frame_name"], "test_tool_point")
+        with self.assertRaises(IKError):
+            SO101Kinematics(self.calibration, self.urdf, self.bounds,
+                            kinematics_factory=LinearModel, tool_frame_name="")
+
+    def test_short_xyz_plan_has_ordered_bounded_waypoints(self):
+        solver = self.make()
+        start = (2000, 2000, 2000, 2000, 2000, 1700)
+        initial = np.asarray(solver.predicted_xyz(start))
+        target = tuple(initial + np.array((0.05233, 0.01447, 0.0)))
+        pairs = []
+        complete = []
+        plan = solver.plan_xyz(
+            start, target, validate_waypoint=lambda a, b: pairs.append((a, b)),
+            validate_plan=lambda first, frames: complete.append((first, frames)),
+        )
+        self.assertGreater(len(plan.waypoints), 1)
+        self.assertEqual(len(pairs), len(plan.waypoints))
+        self.assertEqual(complete, [(start, tuple(step.target_ticks for step in plan.waypoints))])
+        self.assertEqual(plan.start_ticks, start)
+        self.assertEqual(plan.target_ticks, plan.waypoints[-1].target_ticks)
+        self.assertEqual(plan.target_ticks[5], 1700)
+        self.assertEqual(pairs[0][0], start)
+        for previous, following in pairs:
+            self.assertTrue(all(abs(a - b) <= 250 for a, b in zip(previous[:5], following[:5])))
+        for first, second in zip(plan.waypoints, plan.waypoints[1:]):
+            self.assertEqual(first.target_ticks, second.start_ticks)
+            self.assertLessEqual(np.linalg.norm(
+                np.asarray(second.target_xyz_m) - np.asarray(second.start_xyz_m)), 0.03 + 1e-12)
+        final_error = np.linalg.norm(np.asarray(plan.predicted_xyz_m) - target)
+        self.assertGreater(final_error, 0.0)  # Tick rounding leaves a small model residual.
+        self.assertLessEqual(final_error, 0.003)
+
+    def test_xyz_planning_rejects_bad_or_unreachable_requests(self):
+        solver = self.make()
+        start = (2000,) * 6
+        for bad in ((float("nan"), 0, 0), (True, 0, 0), (0, 0)):
+            with self.subTest(bad=bad), self.assertRaises(IKError):
+                solver.solve_xyz(start, bad)
+        current = np.asarray(solver.predicted_xyz(start))
+        with self.assertRaisesRegex(IKError, "step exceeds"):
+            solver.solve_xyz(start, tuple(current + (0.04, 0, 0)))
+        with self.assertRaisesRegex(IKError, "path exceeds"):
+            solver.plan_xyz(start, tuple(current + (0.20, 0, 0)))
+        with self.assertRaisesRegex(IKError, "more waypoints"):
+            solver.plan_xyz(start, tuple(current + (0.10, 0, 0)), max_waypoints=2)
+        with self.assertRaisesRegex(IKError, "Waypoint 1 rejected"):
+            solver.plan_xyz(start, tuple(current + (0.01, 0, 0)),
+                            validate_waypoint=lambda _a, _b: (_ for _ in ()).throw(ValueError("policy")))
+        with self.assertRaisesRegex(IKError, "Candidate path rejected"):
+            solver.plan_xyz(start, tuple(current + (0.01, 0, 0)),
+                            validate_plan=lambda _a, _frames: (_ for _ in ()).throw(ValueError("whole path")))
+        seen_noop = []
+        zero = solver.plan_xyz(start, tuple(current),
+                               validate_plan=lambda first, frames: seen_noop.append((first, frames)))
+        self.assertEqual(zero.waypoints, ())
+        self.assertEqual(seen_noop, [(start, ())])
+        with self.assertRaisesRegex(IKError, "residual"):
+            self.make(StuckModel).solve_xyz(start, tuple(current + (0.01, 0, 0)))
+        with self.assertRaisesRegex(IKError, "outside"):
+            solver.plan_xyz((2990, 2000, 2000, 2000, 2000, 2000),
+                            tuple(np.asarray(solver.predicted_xyz((2990, 2000, 2000, 2000, 2000, 2000)))
+                                  + (0.01, 0, 0)))
+
+    def test_xyz_limit_parameters_are_finite_and_explicit(self):
+        solver = self.make()
+        start = (2000,) * 6
+        point = solver.predicted_xyz(start)
+        for options in ({"max_step_m": float("nan")}, {"max_residual_mm": float("nan")},
+                        {"max_joint_step_ticks": True}, {"orientation_weight": True}):
+            with self.subTest(options=options), self.assertRaises(IKError):
+                solver.solve_xyz(start, point, **options)
+        data = json.loads(self.calibration.read_text())
+        data["shoulder_pan"]["range_min"] = 3500
+        self.calibration.write_text(json.dumps(data))
+        with self.assertRaisesRegex(IKError, "calibration ranges"):
             self.make()
 
 

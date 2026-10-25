@@ -223,9 +223,16 @@ def handler_for(arm, port):
                         self.reply(503, {"error": "Transcription service unavailable"})
                         return
                 elif path == "/api/movement/mode":
-                    if set(data) != {"single_motor_mode"} or type(data["single_motor_mode"]) is not bool:
-                        raise ValueError("single_motor_mode must be boolean")
-                    result = arm.set_single_motor_mode(data["single_motor_mode"])
+                    if set(data) == {"movement_mode"}:
+                        if type(data["movement_mode"]) is not str:
+                            raise ValueError("movement_mode must be a string")
+                        result = arm.set_movement_mode(data["movement_mode"])
+                    elif set(data) == {"single_motor_mode"}:
+                        if type(data["single_motor_mode"]) is not bool:
+                            raise ValueError("single_motor_mode must be boolean")
+                        result = arm.set_single_motor_mode(data["single_motor_mode"])
+                    else:
+                        raise ValueError("Send either movement_mode or single_motor_mode")
                 elif path == "/api/hold/start":
                     motor = motor_id(data.get("motor"))
                     direction = data.get("direction")

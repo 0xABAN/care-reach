@@ -20,6 +20,7 @@ from serial.tools import list_ports
 
 from .bus import real_bus
 from .bus_lock import BusLock
+from .movement_policy import MovementMode, parse_movement_mode, validate_movement_path
 from .timing import MonotonicClock, MotionTiming, TimedBus
 from dance_demo import HOME as DANCE_CENTER, build_plan as build_dance_plan
 from extended_pose import extended_target
@@ -73,6 +74,7 @@ TAUGHT_MAX_LEAD = (POSE_MAX_LEAD, 120, 120, POSE_MAX_LEAD, POSE_MAX_LEAD, POSE_M
 TAUGHT_SETTLE_TOLERANCE = 60
 POSE_NAMES = ("home", "extend", "dance") + TAUGHT_MOVES
 TIMING_SAMPLE_INTERVAL_S = 5.0
+CURRENT_SAMPLE_INTERVAL_S = 0.5
 
 
 def load_taught(path: Path) -> dict[str, list[tuple[int, ...]]]:
@@ -141,7 +143,7 @@ class Arm:
         self.bounds = SafetyBounds.from_files(self.settings_path, self.calibration_path)
         self.park_bounds = folded_bounds(home_bounds(self.bounds, self.home), self.folded)
         self.hold = None
-        self.single_motor_mode = False
+        self.movement_mode = MovementMode.COORDINATED
         self.error = None
         self.closed = False
         self.clock = clock if clock is not None else MonotonicClock()
@@ -150,6 +152,8 @@ class Arm:
         self._last_timing_emit = self.clock.monotonic()
         self.last_snapshot = None
         self.last_logged_at = 0.0
+        self._last_current_at = float("-inf")
+        self._last_current_token = None
         self.last_statuses = None
         self.low_voltage = False
         self.healthy_since = None
@@ -203,6 +207,11 @@ class Arm:
     def _real_bus(port):
         return real_bus(port)
 
+    @property
+    def single_motor_mode(self):
+        """Compatibility alias for the older two-mode dashboard clients."""
+        return self.movement_mode is MovementMode.SINGLE_JOINT
+
     def _read(self, register):
         values = self.bus.sync_read(register, normalize=False, num_retry=2)
         if set(values) != set(JOINT_NAMES):
@@ -251,10 +260,24 @@ class Arm:
                 self.healthy_since = now
         else:
             self.healthy_since = None
-        interval = 0.1 if self.hold is not None else 1.0
-        if now - self.last_logged_at >= interval:
-            self.telemetry.write("sample", motion=self.hold["mode"] if self.hold else None,
-                                 snapshot=snapshot)
+        hold = self.hold
+        token = hold["token"] if hold is not None else None
+        first_motion_sample = token is not None and token != self._last_current_token
+        interval = 0.1 if hold is not None else 1.0
+        if first_motion_sample or now - self.last_logged_at >= interval:
+            details = {"motion": hold["mode"] if hold else None, "snapshot": snapshot}
+            if hold is not None:
+                details["token"] = token
+                if first_motion_sample or now - self._last_current_at >= CURRENT_SAMPLE_INTERVAL_S:
+                    try:
+                        # This is the servo's raw phase-current register, not
+                        # the total current drawn from the shared power supply.
+                        details["current_raw"] = self._read("Present_Current")
+                    except Exception as exc:
+                        details["current_read_error"] = str(exc)
+                    self._last_current_at = now
+                    self._last_current_token = token
+            self.telemetry.write("sample", **details)
             self.last_logged_at = now
         if self.hold is not None and now - self._last_timing_emit >= TIMING_SAMPLE_INTERVAL_S:
             self.telemetry.write("timing_sample", token=self.hold["token"],
@@ -339,6 +362,16 @@ class Arm:
                 self.clock.perf_ns() - self.hold["started_perf_ns"]
             )
 
+    def _write_pose_goals(self, goals):
+        """Write only joints admitted by the active pose's movement policy."""
+        if self.hold is not None and self.movement_mode is MovementMode.SHOULDER_ISOLATED:
+            admitted = self.hold["policy_joints"]
+            goals = {name: tick for name, tick in goals.items()
+                     if JOINT_NAMES.index(name) + 1 in admitted}
+        if goals:
+            self._mark_first_goal_write()
+            self.bus.sync_write("Goal_Position", goals, normalize=False)
+
     def _hold_measured(self, motor):
         name = JOINT_NAMES[motor - 1]
         if self._read("Torque_Enable")[name] != 1:
@@ -385,7 +418,7 @@ class Arm:
         stop_start_ns = self.clock.perf_ns()
         try:
             if previous["mode"] == "pose":
-                self._hold_measured_all()
+                self._hold_measured_all(joints=previous.get("policy_joints"))
             elif settle and previous["mode"] in ("jog", "goto"):
                 name = JOINT_NAMES[previous["motor"] - 1]
                 if self._read("Torque_Enable")[name] == 1:
@@ -423,14 +456,16 @@ class Arm:
                                  token=previous.get("token"), timing=timing,
                                  snapshot=self.last_snapshot)
 
-    def _hold_measured_all(self):
-        """Command every enabled joint to its measured position; never torque off."""
+    def _hold_measured_all(self, *, joints=None):
+        """Hold selected enabled joints at measured position; keep torque."""
         torque = self._read("Torque_Enable")
         if not any(value == 1 for value in torque.values()):
             return
         positions = self._read("Present_Position")
         goals = {}
         for index, name in enumerate(JOINT_NAMES):
+            if joints is not None and index + 1 not in joints:
+                continue
             if torque[name] != 1:
                 continue
             position = positions[name]
@@ -473,13 +508,27 @@ class Arm:
                     **setting,
                 })
             pose = self.hold if self.hold is not None and self.hold["mode"] == "pose" else None
+            ready = all(m["motion_enabled"] for m in motors)
+            available = {name: self.movement_mode is MovementMode.COORDINATED and ready
+                         for name in POSE_NAMES}
+            if self.movement_mode is MovementMode.SHOULDER_ISOLATED and ready:
+                start_ticks = tuple(snapshot[name]["position"] for name in JOINT_NAMES)
+                for name in TAUGHT_MOVES:
+                    try:
+                        validate_movement_path(self.movement_mode, start_ticks, self.taught[name])
+                    except ValueError:
+                        pass
+                    else:
+                        available[name] = bool(self.taught[name])
             return {
                 "motors": motors, "holding": self.hold["motor"] if self.hold else None,
                 "error": self.error, "motion_enabled": any(m["motion_enabled"] for m in motors),
                 "recent_events": list(self.telemetry.recent)[-8:],
+                "movement_mode": self.movement_mode.value,
                 "single_motor_mode": self.single_motor_mode,
-                "pose_enabled": not self.single_motor_mode and all(m["motion_enabled"] for m in motors),
-                "hold_all_enabled": not self.single_motor_mode and not all(m["torque"] for m in motors)
+                "pose_enabled": self.movement_mode is MovementMode.COORDINATED and ready,
+                "pose_available": available,
+                "hold_all_enabled": self.movement_mode is MovementMode.COORDINATED and not all(m["torque"] for m in motors)
                                     and not any(m["fault"] for m in motors),
                 "extended_ticks": dict(zip(JOINT_NAMES, self.extended, strict=True)),
                 "taught_moves": {name: len(steps) for name, steps in self.taught.items()},
@@ -509,7 +558,7 @@ class Arm:
                 for index, name in enumerate(JOINT_NAMES, 1)
             }
 
-    def _require_stopped_motors(self, *, except_motor=None):
+    def _require_stopped_motors(self, *, except_motor=None, only_motors=None):
         """Reject a new owner while another servo has pending or reported motion.
 
         A gripper holding an object can retain its bounded closing preload even
@@ -522,7 +571,7 @@ class Arm:
             positions = self._read("Present_Position")
             goals = self._read("Goal_Position")
             for motor, name in enumerate(JOINT_NAMES, 1):
-                if motor == except_motor:
+                if motor == except_motor or (only_motors is not None and motor not in only_motors):
                     continue
                 tolerance = (SINGLE_MOTOR_GRIP_HOLD_TOLERANCE if motor == 6
                              else POSITION_TOLERANCE)
@@ -537,27 +586,41 @@ class Arm:
                 first_positions = positions
                 time.sleep(SINGLE_MOTOR_SETTLE_SAMPLE_SECONDS)
 
-    def set_single_motor_mode(self, enabled: bool):
-        """Select single-joint controls only, with no implicit motor writes."""
-        if type(enabled) is not bool:
-            raise ValueError("single_motor_mode must be a boolean")
+    def set_movement_mode(self, mode: str):
+        """Select the movement policy without commanding a motor."""
+        selected = parse_movement_mode(mode)
         with self.lock:
             if self.hold is not None:
-                raise ValueError("Stop the active movement before changing single-motor mode")
-            if enabled and not self.single_motor_mode:
+                raise ValueError("Stop the active movement before changing movement mode")
+            if selected is not self.movement_mode:
                 self._require_stopped_motors()
-            self.single_motor_mode = enabled
-            self.telemetry.write("single_motor_mode_changed", enabled=enabled,
+            self.movement_mode = selected
+            self.telemetry.write("movement_mode_changed", mode=selected.value,
                                  snapshot=self.last_snapshot)
-            return {"single_motor_mode": enabled}
+            return {"movement_mode": selected.value}
+
+    def set_single_motor_mode(self, enabled: bool):
+        """Legacy boolean route: True selects single-joint, False coordinated."""
+        if type(enabled) is not bool:
+            raise ValueError("single_motor_mode must be a boolean")
+        self.set_movement_mode("single_joint" if enabled else "coordinated")
+        return {"single_motor_mode": enabled}
+
+    def _check_jog_policy(self, motor):
+        if self.movement_mode is MovementMode.SINGLE_JOINT:
+            self._require_stopped_motors(except_motor=motor)
+        elif self.movement_mode is MovementMode.SHOULDER_ISOLATED:
+            if motor == 2:
+                self._require_stopped_motors(except_motor=2)
+            else:
+                self._require_stopped_motors(only_motors={2})
 
     def start(self, motor, direction):
         with self.lock:
             if self.hold is not None and self.hold["mode"] == "pose":
                 raise ValueError("A pose move is in progress; cancel it before jogging")
             self._stop()
-            if self.single_motor_mode:
-                self._require_stopped_motors(except_motor=motor)
+            self._check_jog_policy(motor)
             snapshot = self._snapshot()
             self._check_snapshot(snapshot, moving_motor=motor)
             name = JOINT_NAMES[motor - 1]
@@ -579,8 +642,7 @@ class Arm:
             if type(target) is not int:
                 raise ValueError("Target must be an integer tick")
             self._stop()
-            if self.single_motor_mode:
-                self._require_stopped_motors(except_motor=6)
+            self._check_jog_policy(6)
             snapshot = self._snapshot()
             self._check_snapshot(snapshot, moving_motor=6)
             position = snapshot["gripper"]["position"]
@@ -596,12 +658,14 @@ class Arm:
 
     def pose_start(self, pose):
         with self.lock:
-            if self.single_motor_mode:
+            if self.movement_mode is MovementMode.SINGLE_JOINT:
                 raise ValueError("Multi-joint poses are unavailable in single-motor mode; turn it off first")
             if self.hold is not None:
                 raise ValueError("A movement is already active; cancel it before starting a pose move")
             if pose not in POSE_NAMES:
                 raise ValueError(f"pose must be one of {', '.join(POSE_NAMES)}; folded pose is unavailable with the wrist camera")
+            if self.movement_mode is MovementMode.SHOULDER_ISOLATED and pose in ("home", "extend", "dance"):
+                raise ValueError(f"{pose} needs a coordinated path; select coordinated mode first")
             taught = pose in TAUGHT_MOVES
             if taught and not self.taught[pose]:
                 raise ValueError(f"{pose} has no saved positions yet; teach it first")
@@ -648,11 +712,18 @@ class Arm:
                     if any(not self.firmware_min[name] <= frame[index] <= self.firmware_max[name]
                            for index, name in enumerate(JOINT_NAMES)):
                         raise RuntimeError(f"{pose} trajectory exceeds a firmware limit")
+            policy_joints = frozenset(range(1, 7))
+            if self.movement_mode is MovementMode.SHOULDER_ISOLATED:
+                policy_joints = validate_movement_path(
+                    self.movement_mode, start_ticks, trajectory if trajectory is not None else (target,)
+                )
+                self._require_stopped_motors(only_motors=set(range(1, 7)) - policy_joints)
             self.hold = {
                 "token": uuid.uuid4().hex, "motor": None, "mode": "pose", "pose": pose,
                 "stage": "home" if pose == "dance" else None,
                 "dance_frames": dance_frames,
                 "trajectory": trajectory, "frame_index": 0,
+                "policy_joints": policy_joints,
                 "target": target, "bounds": envelope,
                 "start_positions": {name: snapshot[name]["position"] for name in JOINT_NAMES},
                 "measured": {name: snapshot[name]["position"] for name in JOINT_NAMES},
@@ -705,8 +776,7 @@ class Arm:
             # The previous bounded goal is already near this endpoint. Keep
             # the exact pose as the holding goal so completion does not snap
             # the target backward to a still-moving encoder reading.
-            self._mark_first_goal_write()
-            self.bus.sync_write("Goal_Position", dict(zip(JOINT_NAMES, targets, strict=True)), normalize=False)
+            self._write_pose_goals(dict(zip(JOINT_NAMES, targets, strict=True)))
             if hold["pose"] == "dance" and hold["stage"] == "home":
                 hold["stage"] = "entry"
                 hold["target"] = DANCE_CENTER
@@ -762,8 +832,7 @@ class Arm:
             if (direction > 0 and goal < position) or (direction < 0 and goal > position):
                 goal = position
             goals[name] = int(goal)
-        self._mark_first_goal_write()
-        self.bus.sync_write("Goal_Position", goals, normalize=False)
+        self._write_pose_goals(goals)
         hold["writes"] += 1
         hold["last_update"] = now
         hold["next"] = now + (HOME_TRIM_PERIOD if trimming else POSE_STEP_SECONDS)
@@ -808,8 +877,7 @@ class Arm:
             goal = positions[name] + max(-POSE_MAX_LEAD, min(POSE_MAX_LEAD, distance))
             goals[name] = int(goal)
         validate_pose(tuple(goals[name] for name in JOINT_NAMES), self.bounds)
-        self._mark_first_goal_write()
-        self.bus.sync_write("Goal_Position", goals, normalize=False)
+        self._write_pose_goals(goals)
         hold["last_goals"] = goals
         if not behind:
             hold["frame_index"] += 1
@@ -982,8 +1050,10 @@ class Arm:
 
     def hold_all(self):
         with self.lock:
-            if self.single_motor_mode:
+            if self.movement_mode is MovementMode.SINGLE_JOINT:
                 raise ValueError("Hold all joints is unavailable in single-motor mode; turn it off first")
+            if self.movement_mode is MovementMode.SHOULDER_ISOLATED:
+                raise ValueError("Hold all joints requires coordinated mode")
             if self.hold is not None and self.hold["mode"] == "pose":
                 raise ValueError("A pose move is in progress; cancel it before holding all joints")
             self._stop()
@@ -1141,8 +1211,7 @@ class Arm:
             final = dict(zip(JOINT_NAMES, hold["target"], strict=True))
             if taught:
                 final["gripper"] = max(final["gripper"], positions["gripper"] - GRIP_HOLD_LEAD)
-            self._mark_first_goal_write()
-            self.bus.sync_write("Goal_Position", final, normalize=False)
+            self._write_pose_goals(final)
             if hold["pose"] == "dance" and hold["stage"] == "home":
                 hold["trajectory"] = None
                 hold["stage"] = "entry"
@@ -1158,8 +1227,7 @@ class Arm:
                 hold["progress"] = 1.0
                 self._complete_pose(snapshot)
             return
-        self._mark_first_goal_write()
-        self.bus.sync_write("Goal_Position", goals, normalize=False)
+        self._write_pose_goals(goals)
         hold["writes"] += 1
         hold["last_update"] = now
         if not behind and hold["frame_index"] < len(frames) - 1:
