@@ -1,100 +1,96 @@
-# Care Reach SO-101 follower
+<h1 align="center">Third Hand</h1>
 
-This repository controls Lance's assembled six-motor SO-101 follower. The headless Raspberry Pi 5 (8 GB) is connected to the URT-2 board and owns the servo bus. A Mac mini is reachable from the Pi over Tailscale for later model inference.
+<p align="center"><em>An extra hand should be as easy to reach as your voice.</em></p>
 
-## Connect and open the dashboard
+Third Hand is an assistive robotics prototype built around a six-motor SO-101 arm, two live camera feeds, and a Raspberry Pi 5. The goal is to let someone request an everyday object and have the arm bring it within reach. Today, the arm responds to supported voice commands, streams motor telemetry and camera views, and runs guarded joint and gripper motions. **Autonomous camera-guided pickup and delivery are not implemented.**
+
+## Why Third Hand
+
+The project was inspired by a teammate's friend with quadriplegia. Moving a cup or repositioning an everyday item can mean waiting for help. We are investigating whether an affordable robotics stack can eventually make those actions available on demand. The distance between recognizing a request and manipulating a real object reliably is the central engineering problem.
+
+```mermaid
+flowchart LR
+  M[Microphone] --> S[Cartesia Ink 2<br/>streaming STT]
+  S --> J[Jev<br/>allowlisted decision]
+  J --> G{Motion guard}
+  G --> P[Pi controller<br/>single bus owner]
+  P --> A[SO-101 arm]
+  C[Two live cameras] --> V[Dashboard preview]
+  C -.->|planned localization| G
+
+  classDef input fill:#172554,stroke:#60a5fa,color:#eff6ff
+  classDef service fill:#312e81,stroke:#a5b4fc,color:#eef2ff
+  classDef guard fill:#78350f,stroke:#fbbf24,color:#fffbeb
+  classDef hardware fill:#14532d,stroke:#4ade80,color:#f0fdf4
+  class M,C input
+  class S,J,V service
+  class G guard
+  class P,A hardware
+```
+
+Solid arrows are implemented. The dotted camera-to-motion path requires calibration, object localization, grasp planning, and physical validation.
+
+## System
+
+| Layer | Implementation | Responsibility |
+| --- | --- | --- |
+| Hardware | Raspberry Pi 5, URT-2, six-servo SO-101 | Physical arm and serial motor bus |
+| Motor control | [`arm_control/`](arm_control/) | Exclusive bus lock, measured state, bounded movement, pose execution, telemetry |
+| Dashboard | [`server.py`](server.py), [`static/`](static/) | HTTP control, diagnostics, camera relay, and live operator view |
+| Cameras | Two Pi-local `ustreamer` services | MJPEG streams and latest-frame dashboard snapshots |
+| Voice | [`voice/`](voice/) | Cartesia transcription, Jev command decision, direct-request checks, dashboard requests |
+| Kinematics | [`so101_ik.py`](so101_ik.py) | Calibrated tick conversion and experimental local FK/IK |
+| Concept demo | [`simulation/`](simulation/) | GPU-preferred Three.js visualization with no motor connection |
+
+Motor order is shoulder pan, shoulder lift, elbow flex, wrist flex, wrist roll, and gripper. The dashboard is the normal **single owner** of the URT-2 serial bus; standalone motor programs must stop that service first. The controller checks measured position, joint and firmware bounds, torque, faults, voltage, load, and progress. A fault or stop holds the measured position; it does not automatically resume. Home/Retract and Extend use physically recorded tick poses. The historical Fold pose is blocked with the wrist camera attached. See the [motor runtime](ARM_RUNTIME.md), [Pi setup](docs/PI_RUNTIME.md), and [kinematics notes](docs/KINEMATICS.md).
+
+## Voice pipeline
+
+The Pi voice service defaults to **Cartesia Ink 2 over a WebSocket**. [`voice/streaming_stt.py`](voice/streaming_stt.py) sends paced, 100 ms chunks of 16 kHz mono `pcm_s16le`. Its bounded buffer favors current audio if the connection falls behind, and short microphone gaps are padded with silence so a stalled stream is not mistaken for a speaking pause.
+
+Cartesia supplies speech-to-text and turn detection. `turn.update` is a partial transcript; `turn.eager_end` is provisional and may be followed by `turn.resume`; **only `turn.end` dispatches a completed utterance**. The service records turn, first-partial, and finalization timings. After repeated streaming failures, it falls back to an **Ink-Whisper batch transcription** path. The service starts with listening paused; pausing closes the stream and stops audio upload. See [Cartesia's Ink 2 documentation](https://docs.cartesia.ai/build-with-cartesia/stt/latest) and [WebSocket turn events](https://docs.cartesia.ai/api-reference/stt/turns/websocket).
+
+The final transcript must contain **“Hey Arm”** and a command in the same utterance. Only text after the wake phrase is sent to **Jev (`typesafe/jev-1.14`) through OpenRouter** for a constrained command decision. The decision must match the local allowlist and pass direct-request checks before the voice service calls the Pi dashboard. Cartesia and Jev never output raw servo targets. Supported voice actions include Home/Retract, Extend, Dance, bounded gripper opening/closing, stop, and supported taught moves. “Pick up the can” is recognized but rejected as unavailable because no camera-derived grasp target exists.
+
+Voice stop still depends on microphone capture, transcription, the network, and controller dispatch. It is **not an instantaneous physical emergency stop**. See [`voice/pi_voice.py`](voice/pi_voice.py) and [voice runtime installation](deploy/pi/install-voice-runtime.sh).
+
+## Live cameras
+
+The dashboard relays two Pi-local camera services at `/camera/stream` and `/camera2/stream`; `/camera/snapshot` and `/camera2/snapshot` provide individual JPEG frames. The Camera tab polls recent snapshots rather than queueing a delayed video stream. Both feeds are available to dashboard users, but neither camera has been calibrated into the robot's coordinate frame. **A visible object is not yet a reachable motor target.** See [camera setup and device details](docs/CAMERA.md).
+
+## Simulation
+
+The [Third Hand simulation](simulation/) shows a seated person requesting water and a wheelchair-mounted SO-101 visual model bringing a lidded cup into reach. The object detection, grasp, transport, and user interaction in this scene are simulated. It does not use the microphone, Cartesia, Pi camera feeds, or physical motors.
+
+```bash
+cd simulation
+npm ci
+npm run dev
+```
+
+Open the local URL printed by Vite. The guided scene starts automatically; **Start manually** allows target confirmation and cup return. Drag to orbit, scroll to zoom, press Space to pause, and press Escape to stop. Three.js requests a high-performance WebGL context; the app reports the actual renderer chosen by the browser and OS. See [simulation controls and asset credits](simulation/README.md).
+
+## Run and verify
+
+The Pi dashboard serves the trusted local network at `http://pi.local:8765`. It has no login, so network access grants motor control. From an authorized machine:
 
 ```bash
 ssh robot@pi.local
+systemctl --user status care-reach-dashboard.service care-reach-pi-voice.service
 ```
 
-The `robot` account uses SSH keys only, with no password, and has passwordless `sudo`. The Pi also appears on Tailscale as `care-reach-robot-pi`. From any Pi shell, `ssh mac` reaches the Mac mini as `lancestreuber` through Tailscale SSH. Pi users share that Mac account, so give Pi shell access only to trusted teammates.
+Follow [the Pi runtime guide](docs/PI_RUNTIME.md) before changing services or opening the serial bus directly. The detailed [motor runtime](ARM_RUNTIME.md) records the current Pi worktrees, pose definitions, telemetry, and tested motion behavior.
 
-The dashboard runs from `~/worktrees/care-reach/arm-runtime-main-20261025`; the separate voice service runs from `~/worktrees/care-reach/voice-runtime`. The older `pi-runtime` checkout supplies the arm's Python virtual environment. Check `systemctl --user cat care-reach-dashboard.service care-reach-pi-voice.service` to confirm the live paths. Teammates should use [separate branches and worktrees on the Pi](docs/PI_BRANCHES.md) so they do not switch a live checkout. The URT-2's stable port is `/dev/serial/by-id/usb-1a86_USB_Single_Serial_5B79078563-if00`.
-
-The dashboard runs headless on the Pi and binds `0.0.0.0:8765`. Install it with `bash deploy/pi/install-dashboard.sh` from the Pi checkout. Open [`http://pi.local:8765`](http://pi.local:8765) from the same local network. For a direct cable to a computer, run `bash deploy/pi/setup-direct-ethernet.sh` once on the Pi. Anyone who can reach the panel can control the arm; it does not ask for a login. On this Mac, `bash deploy/mac/dashboard-tunnel.sh` opens [the dashboard](http://127.0.0.1:8765) through Tailscale SSH without Ethernet; its `stop` argument closes the tunnel. The panel provides held Forward/Backward jog, 1×/2×/4×/8× rates, go-to-tick, live servo readings, and Home / Retract, Extend, and full-size Dance buttons. A faulted servo's jog is disabled while healthy joints remain available; group poses pause until every joint is healthy. Shared voltage alarms still stop motion. Saved soft bounds and speed scales persist in tracked [`joint_settings.json`](joint_settings.json); the panel shows the bounds read-only, so edit that file directly to change them.
-
-Only **one process** may own the serial bus. Before a standalone dance or other CLI motion, stop the panel on the Pi with `systemctl --user stop care-reach-dashboard.service`; restart it afterward with `systemctl --user start care-reach-dashboard.service`. The panel's Home / Retract, Extend, and Dance buttons use that same bus owner. Home targets [`home_pose.json`](home_pose.json); Extend targets the physically confirmed upright ticks in [`extended_pose.json`](extended_pose.json). Home↔Extend uses synchronized motion with at most 55 ticks of commanded lead. Dance moves to Home, enters the ordinary-bounds choreography at `(2000,)*6`, plays the synchronized plan, and returns Home. Each move monitors bounds, torque, faults, voltage, load, progress, and timeout. A completed move keeps its exact pose as the holding goal; cancel or fault holds the measured position. Torque stays on. Press the active button again to cancel. The old Fold command is unavailable because the wrist camera blocks that pose.
-
-The Pi records timestamped motor positions, goals, voltage, status, load, temperature, motion commands, fault transitions, and errors in `~/.local/state/care-reach/telemetry.jsonl` (20 MB × 6 rotating files). It samples about once per second at rest and up to ten times per second while moving; status and voltage-threshold changes are recorded immediately when observed. Current readings are added when a fault or low-voltage transition is observed. Use `tail -n 30 ~/.local/state/care-reach/telemetry.jsonl` on the Pi, or expand **Recent power and servo events** in the dashboard. A previously reported voltage alarm on an idle, unrelated servo does not block a healthy joint after voltage has recovered; a new alarm during motion or a confirmed voltage below 4.8 V still stops the move. The controller does not resume a stopped move automatically.
-
-When a closing gripper jog ends normally or loses its heartbeat, the controller keeps a closing goal no more than 30 ticks inside its measured position, rather than replacing it with the measured position and letting the jaws rebound. A closing go-to-tick retains its target when it reaches it. A servo fault still ends the move with a measured-position hold, and the gripper should not be used to hold a critical load until its force and power delivery have been tested with that object.
-
-## Movement library
-
-The importable `arm_control/` package owns motor communication and movement. Its modules have separate jobs:
-
-- `arm.py` runs dashboard jogs, go-to-tick, Home, Extend, Dance, and taught moves with the existing safety checks.
-- `runtime.py` (`ArmRuntime`), `pose_runner.py` (`MeasuredPoseRunner`), `home.py`, and `shake.py` (`WristShake`) run the direct movement routines.
-- `bus.py` builds the six STS3215 motors and manages exclusive bus ownership.
-
-`server.py` now handles HTTP and the camera feed. It re-exports `Arm`, `find_port`, and tuning constants for existing callers. `motion_core.py` remains an offline planner with no hardware access.
-
-Each real connection holds a nonblocking lock at `~/.local/state/care-reach/arm-bus.lock` until it disconnects. A standalone program gets a busy error if the dashboard already owns the bus. Fake buses used in tests skip the default lock; a caller that explicitly supplies a `BusLock` still uses it.
-
-Timing uses `time.perf_counter_ns`, so changes to the wall clock do not affect durations. Dashboard logs still have UTC timestamps. Records for one motion share a `token`; stop, completion, and error records include timing measured so far. Long motions also log a `timing_sample` about every five seconds. Duration windows report `count`, `mean_ms`, and `max_ms`:
-
-| Field | Meaning |
-| --- | --- |
-| `first_command_ms` | From motion start to submission of its first goal write. This does not measure when the motor starts moving. |
-| `bus_read_ms` | Time spent completing serial register reads. |
-| `bus_write_ms` | Time for a serial write call to return. Addressed writes may wait for an acknowledgement; sync writes do not. This is not physical actuator latency. |
-| `compute_ms` | Python controller time per control cycle outside measured serial calls, including safety checks and telemetry. |
-| `cycle_ms` | Total elapsed time spent executing a control cycle. |
-| `schedule_lag_ms` | How late a cycle starts past its scheduled time. |
-| `settle_ms` | Time from starting a pose move until encoder readings reach the target tolerance; present on completed poses. |
-| `motion_elapsed_ms` | Time from start to stop for a stopped motion. |
-| `stop_command_ms` | Time spent reading feedback and issuing the final holding goal during stop. |
-
-Direct runners return bus and compute timing windows without persistent telemetry. The Home, Dance, and wrist trial commands print a short summary after a completed run.
-
-`home.py` and `shake_it_crazy_style.py` are command-line wrappers around the library. `dance_demo.py` keeps its offline planner and calls a library runner for `--execute`; `park.py` only plans the historical Fold pose offline because the wrist camera blocks execution. Existing imports of `arm_runtime.py` and `measured_pose_runner.py` still work. Stop the dashboard before a standalone hardware run so only one program controls the arm.
-
-The USB camera's [live feed](docs/CAMERA.md) appears in the dashboard's **Camera** tab at the same dashboard address. The camera service stays on Pi localhost; the dashboard relays the feed to anyone who can reach the panel.
-
-## Pose names
-
-| Name | Meaning |
-| --- | --- |
-| **Home / Retract** | `(2000, 1056, 3065, 2027, 387, 1993)` raw ticks on motors 1–6, saved in [`home_pose.json`](home_pose.json). |
-| **Extend** | `(2000, 1903, 1126, 1988, 387, 1993)` raw ticks, upright with the wrist camera attached, saved in [`extended_pose.json`](extended_pose.json). |
-| **Folded** | Historical `(2040, 893, 3064, 2888, 2416, 1470)` ticks in [`folded_pose.json`](folded_pose.json). The camera obstructs this pose; dashboard and voice commands reject it, and `park.py --execute` refuses. |
-| **Parked / Coiled** | Historical compact-rest terminology. No camera-safe torque-release target is validated. |
-
-See [pose definitions and limits](docs/POSES.md). The camera-mounted controller has no automatic torque-release procedure.
-
-The Pi voice tester acts after the exact wake phrase **“Hey Arm”** followed by a command in the same utterance. The wake phrase can appear after other speech in Cartesia's final transcript. The Pi sends only the words after it to Jev (`typesafe/jev-1.14`) through OpenRouter; it never sends pre-wake speech for a command decision. Transcription starts paused on every service launch; enable it with the dashboard toggle for that session. Once listening is on, no separate motion enable is required. “Retract” and “go home” select Home; “extend” selects the upright pose; “dance” selects the saved choreography. “Open the hand” and “close the hand” use the bounded gripper move. The retired Fold pose is not a voice command.
-
-## Motion
-
-`motion_core.py` plans bounded synchronized trajectories. `arm_control/runtime.py` (still importable as `arm_runtime`) checks measured position, torque, mode, fault status, voltage, load, software limits, and firmware limits, and leaves torque enabled on exit. `arm_control/pose_runner.py` (still importable as `measured_pose_runner`) moves from an in-bounds measured pose with bounded position lead. Motor order is 1 shoulder pan, 2 shoulder lift, 3 elbow flex, 4 wrist flex, 5 wrist roll, 6 gripper.
-
-[`so101_ik.py`](so101_ik.py) translates this arm's calibrated encoder ticks to the official SO-101 model's joint degrees and provides guarded local FK/IK. See [kinematics setup and live validation](docs/KINEMATICS.md). Cartesian targets are still experimental; the dashboard's Home and Extend use saved tick poses and a guarded synchronized path.
-
-The original full-scale free-space dance ran on the Pi on 2026-10-24: 1,182 frames over 59.4 seconds, ending at `(1994, 2015, 2003, 2009, 2001, 2006)`, near the former choreography center. The transition to the newly recorded Home has only been checked offline. To preview its path without opening the bus:
-
-```bash
-cd ~/worktrees/care-reach/pi-runtime
-PYTHONPATH=~/worktrees/care-reach/lerobot-runtime-src .venv/bin/python dance_demo.py --dry-run --scale 1
-```
-
-After stopping the dashboard and verifying a clear, fault-free arm near Home, run:
-
-```bash
-PYTHONPATH=~/worktrees/care-reach/lerobot-runtime-src .venv/bin/python dance_demo.py --execute --scale 1 \
-  --port /dev/serial/by-id/usb-1a86_USB_Single_Serial_5B79078563-if00
-```
-
-The saved soft bounds intersect [`joint_settings.json`](joint_settings.json), LeRobot calibration, and provisional stops of wrist roll at 3300 ticks and gripper close at 1340 ticks. Motor 3's upper bound is 3065 ticks, the recorded Home position. `park.py` retains the old Fold plan for offline inspection, but `--execute` refuses before opening the bus. Wrist roll resisted movement near 3358 ticks, so its full-turn sweep is unverified.
-
-The active calibration lives in `~/.cache/huggingface/lerobot/calibration/robots/so_follower/care_reach_follower.json` on the Pi. A versioned recovery copy is [`config/care_reach_follower.json`](config/care_reach_follower.json). The Pi uses a motor-only LeRobot 0.6.2 source pinned to commit `d3793b7e36522321c1c455f0dc4826db3793dceb` plus our tracked [import patch](config/lerobot_motor_only_utils.patch); see [runtime setup](docs/PI_RUNTIME.md).
-
-## Models and tests
-
-The downloaded public SO-101 dataset and ACT checkpoint are research inputs, not validated live policies here. Converted source actions exceed this arm's saved limits in 18.47% of frames, and all 128 source episodes contain an out-of-limit action. The checkpoint also requires calibrated top and wrist cameras. See [findings](research/open_so101_motion/FINDINGS.md) and [local feasibility](research/open_so101_motion/LOCAL_FEASIBILITY.md). Large model and dataset files stay outside Git.
-
-From the Pi checkout, run the offline tests with:
+Run offline tests in the configured Pi environment:
 
 ```bash
 PYTHONPATH=~/worktrees/care-reach/lerobot-runtime-src .venv/bin/python -m unittest discover -s tests -q
 ```
+
+The physical arm has completed synchronized six-joint motion and guarded individual moves. Nearby Cartesian trials completed without servo faults, but their endpoint estimates came from encoders and a kinematic model, not external tool measurement. The researched ACT checkpoint is not deployed: **18.47% of converted actions in one public SO-101 dataset exceeded this arm's saved limits**, and the checkpoint expects calibrated top and wrist camera views. See [model findings](research/open_so101_motion/FINDINGS.md). No autonomous physical pickup or delivery has been demonstrated.
+
+## Next milestone
+
+Calibrate the cameras and robot workspace, localize one known lightweight object, validate a reachable grasp and collision-aware approach, then repeat supervised physical pickups while measuring success externally. Power delivery and payload behavior must also be tested under load. Wheelchair navigation remains a future goal.
+
+The code is available under the [MIT License](LICENSE). Third-party simulation assets and their licenses are identified in the [simulation README](simulation/README.md).
