@@ -104,7 +104,7 @@ class DashboardBase(unittest.TestCase):
         self.pose_path.write_text(json.dumps(pose), encoding="utf-8")
 
     def arm(self, bus):
-        thread_patch = patch("server.threading.Thread")
+        thread_patch = patch("arm_control.arm.threading.Thread")
         thread_patch.start()
         self.addCleanup(thread_patch.stop)
         arm = Arm("fake", bus_factory=lambda _: bus, settings_path=self.settings_path,
@@ -869,7 +869,7 @@ class HttpHostTests(unittest.TestCase):
         self.settings_path.write_text(json.dumps(settings), encoding="utf-8")
         self.calibration_path.write_text(json.dumps(calibration), encoding="utf-8")
         self.pose_path.write_text(json.dumps(pose), encoding="utf-8")
-        thread_patch = patch("server.threading.Thread")
+        thread_patch = patch("arm_control.arm.threading.Thread")
         thread_patch.start()
         self.addCleanup(thread_patch.stop)
         arm = Arm("fake", bus_factory=lambda _: FakeBus((2000,) * 6), settings_path=self.settings_path,
