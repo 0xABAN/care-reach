@@ -922,6 +922,36 @@ class TaughtMoveTests(DashboardBase):
         vmax, _ = taught_limits(2.0)
         self.assertTrue(all(v <= cap for v, cap in zip(vmax, MAX_COMMAND_SPEED)))
 
+    def test_far_reaching_home_moves_elbow_shoulder_wrist_one_at_a_time(self):
+        far = self.offset(-80, 1500, -720, -570, 0, 500)
+        bus = TrackingBus(far)
+        arm = self.taught_arm(bus)
+        arm.pose_start("home")
+        self.assertTrue(arm.hold["staged"])
+        order = []
+        start = time.monotonic()
+        for step in range(1, 20000):
+            if arm.hold is None:
+                break
+            before = bus.positions.copy()
+            arm._advance(start + step * 0.05)
+            moved = [name for name in ("shoulder_lift", "elbow_flex", "wrist_flex")
+                     if abs(bus.positions[name] - before[name]) > 2]
+            self.assertLessEqual(len(moved), 1, f"moved together: {moved}")
+            if moved and (not order or order[-1] != moved[0]):
+                order.append(moved[0])
+        self.assertIsNone(arm.hold)
+        self.assertIsNone(arm.error)
+        self.assertEqual(order, ["elbow_flex", "shoulder_lift", "wrist_flex"])
+        for index, name in enumerate(JOINT_NAMES):
+            self.assertLessEqual(abs(bus.positions[name] - self.HOME[index]), POSE_TOLERANCE, name)
+
+    def test_home_near_home_keeps_original_path(self):
+        bus = TrackingBus(self.offset(0, 100, -100, 0, 0, 0))
+        arm = self.taught_arm(bus)
+        arm.pose_start("home")
+        self.assertFalse(arm.hold["staged"])
+
     def test_stop_cancels_taught_move_and_holds_measured(self):
         bus = TrackingBus(self.HOME)
         arm = self.taught_arm(bus)

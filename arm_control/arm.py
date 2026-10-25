@@ -134,15 +134,34 @@ def taught_segments(start, steps):
         if not carrying:
             segments.append((tuple(begin), tuple(end)))
             continue
-        current = list(begin)
-        for joints in CARRY_ORDER:
-            following = list(current)
-            for index in joints:
-                following[index] = end[index]
-            if following != current:
-                segments.append((tuple(current), tuple(following)))
-                current = following
+        segments += staged_segments(begin, end, CARRY_ORDER)
     return segments
+
+
+def staged_segments(begin, end, order):
+    """Split one move into consecutive moves of the joint groups in ``order``."""
+    segments = []
+    current = list(begin)
+    for joints in order:
+        following = list(current)
+        for index in joints:
+            following[index] = end[index]
+        if following != current:
+            segments.append((tuple(current), tuple(following)))
+            current = following
+    return segments
+
+
+# Home from a far-reaching pose folds the elbow, then lifts the shoulder, then
+# the wrist, then the rest. Pulling several loaded joints at once sagged the
+# supply below MIN_VOLTAGE_RAW; one at a time it stays healthy.
+HOME_ORDER = ((2,), (1,), (3,), (0, 4, 5))
+HOME_STAGE_TICKS = 150
+
+
+def needs_staged_home(start, home):
+    """Whether at least two of the shoulder, elbow, and wrist are far from Home."""
+    return sum(abs(start[index] - home[index]) > HOME_STAGE_TICKS for index in (1, 2, 3)) >= 2
 
 
 def find_port():
@@ -751,6 +770,8 @@ class Arm:
             coordinated = pose == "extend" or (
                 pose in ("home", "dance") and self._on_upright_corridor(start_ticks)
             )
+            staged = (pose == "home" and not coordinated
+                      and needs_staged_home(start_ticks, target))
             if taught:
                 trajectory = []
                 vmax, amax = taught_limits(self.taught_speed[pose])
@@ -758,6 +779,10 @@ class Arm:
                     trajectory += quintic_segment(begin, end, vmax, amax, EXTEND_FPS)
             elif coordinated:
                 trajectory = quintic_segment(start_ticks, target, EXTEND_VMAX, EXTEND_AMAX, EXTEND_FPS)
+            elif staged:
+                trajectory = []
+                for begin, end in staged_segments(start_ticks, target, HOME_ORDER):
+                    trajectory += quintic_segment(begin, end, TAUGHT_VMAX, TAUGHT_AMAX, EXTEND_FPS)
             else:
                 trajectory = None
             if trajectory is not None:
@@ -776,7 +801,7 @@ class Arm:
                 "token": uuid.uuid4().hex, "motor": None, "mode": "pose", "pose": pose,
                 "stage": "home" if pose == "dance" else None,
                 "dance_frames": dance_frames,
-                "trajectory": trajectory, "frame_index": 0,
+                "trajectory": trajectory, "frame_index": 0, "staged": staged,
                 "policy_joints": policy_joints,
                 "target": target, "bounds": envelope,
                 "start_positions": {name: snapshot[name]["position"] for name in JOINT_NAMES},
@@ -1235,7 +1260,8 @@ class Arm:
         frame = frames[frame_index]
         goals = {}
         behind = False
-        taught = hold["pose"] in TAUGHT_MOVES
+        # Staged Home uses the same loaded-joint tracking as taught moves.
+        taught = hold["pose"] in TAUGHT_MOVES or hold.get("staged", False)
         leads = TAUGHT_MAX_LEAD if taught else (EXTEND_MAX_LEAD,) * 6
         last_frame = frame_index == len(frames) - 1
         settled = hold.setdefault("settled", set())
