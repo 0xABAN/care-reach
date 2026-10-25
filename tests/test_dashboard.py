@@ -687,6 +687,21 @@ class WeakShoulderBus(TrackingBus):
         self.positions["shoulder_lift"] = max(self.positions["shoulder_lift"], self.lifted + 45)
 
 
+class VoltageSagBus(TrackingBus):
+    """Supply sags 0.08 raw units per tick of the hardest push; the elbow is slow."""
+
+    def sync_write(self, register, values, normalize=True):
+        before = self.positions.copy()
+        super().sync_write(register, values, normalize)
+        if register != "Goal_Position":
+            return
+        elbow = before["elbow_flex"]
+        self.positions["elbow_flex"] = elbow + max(-4, min(4, values["elbow_flex"] - elbow))
+        push = max(abs(values[name] - before[name]) for name in JOINT_NAMES if name != "gripper")
+        sag = round(53 - 0.08 * push)
+        self.voltages = {name: sag for name in JOINT_NAMES}
+
+
 class TaughtMoveTests(DashboardBase):
     HOME = home_target()
 
@@ -975,6 +990,25 @@ class TaughtMoveTests(DashboardBase):
         self.assertGreaterEqual(bus.goals["gripper"], mouth[5] - GRIP_HOLD_LEAD)
         for index, name in enumerate(JOINT_NAMES[:5]):
             self.assertLessEqual(abs(bus.positions[name] - mouth[index]), POSE_TOLERANCE, name)
+
+    def test_staged_home_eases_push_when_voltage_sags_and_still_arrives(self):
+        far = self.offset(-80, 1500, -720, -570, 0, 500)
+        bus = VoltageSagBus(far)
+        arm = self.taught_arm(bus)
+        arm.pose_start("home")
+        self.assertTrue(arm.hold["staged"])
+        lowest = 99
+        start = time.monotonic()
+        for step in range(1, 60000):
+            if arm.hold is None:
+                break
+            arm._advance(start + step * 0.05)
+            lowest = min(lowest, min(bus.voltages.values()))
+        self.assertIsNone(arm.hold)
+        self.assertIsNone(arm.error)
+        self.assertGreaterEqual(lowest, 48)  # Never reached the hard stop.
+        for index, name in enumerate(JOINT_NAMES):
+            self.assertLessEqual(abs(bus.positions[name] - self.HOME[index]), POSE_TOLERANCE, name)
 
     def test_stop_cancels_taught_move_and_holds_measured(self):
         bus = TrackingBus(self.HOME)

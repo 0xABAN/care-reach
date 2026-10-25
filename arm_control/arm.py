@@ -78,6 +78,11 @@ TAUGHT_SPEEDS = (1.0, 1.5, 2.0)
 TAUGHT_MOVE_SPEEDS = {"bring_to_mouth": (1.0,)}
 TAUGHT_MAX_LEAD = (POSE_MAX_LEAD, 120, 120, POSE_MAX_LEAD, POSE_MAX_LEAD, POSE_MAX_LEAD)
 TAUGHT_SETTLE_TOLERANCE = 60
+# Shared supply: pushing harder draws more current and sags every servo. In
+# taught and staged moves, ease the push as voltage nears MIN_VOLTAGE_RAW and
+# wait for it to recover, instead of driving into the hard stop.
+VOLTAGE_EASE_RAW = 50
+TAUGHT_EASE_MIN = 0.25
 POSE_NAMES = ("home", "extend", "dance") + TAUGHT_MOVES
 TIMING_SAMPLE_INTERVAL_S = 5.0
 CURRENT_SAMPLE_INTERVAL_S = 0.5
@@ -823,7 +828,8 @@ class Arm:
                 "started_perf_ns": self.clock.perf_ns(),
                 "next": now, "last_update": now,
                 "expires": now + max(POSE_TIMEOUT_SECONDS,
-                                     len(trajectory) / EXTEND_FPS + 30 if trajectory else 0),
+                                     len(trajectory) / EXTEND_FPS * (3 if taught or staged else 1) + 30
+                                     if trajectory else 0),
             }
             self.timing.reset()
             self.telemetry.write("motion_started", mode="pose", pose=pose,
@@ -1272,7 +1278,21 @@ class Arm:
         behind = False
         # Staged Home uses the same loaded-joint tracking as taught moves.
         taught = hold["pose"] in TAUGHT_MOVES or hold.get("staged", False)
-        leads = TAUGHT_MAX_LEAD if taught else (EXTEND_MAX_LEAD,) * 6
+        if hold.get("staged"):
+            leads = (POSE_MAX_LEAD,) * 6  # Home's normal limit, one joint at a time.
+        else:
+            leads = TAUGHT_MAX_LEAD if taught else (EXTEND_MAX_LEAD,) * 6
+        easing = False
+        if taught:
+            low_voltage = min(snapshot[name]["voltage"] for name in JOINT_NAMES)
+            easing = low_voltage < VOLTAGE_EASE_RAW
+            ease = hold.get("ease", 1.0)
+            ease = max(TAUGHT_EASE_MIN, ease * 0.5) if easing else min(1.0, ease + 0.05)
+            if easing and hold.get("ease", 1.0) == 1.0:
+                self.telemetry.write("voltage_ease", pose=hold["pose"], voltage=low_voltage,
+                                     snapshot=snapshot)
+            hold["ease"] = ease
+            leads = tuple(max(10, round(lead * ease)) for lead in leads)
         last_frame = frame_index == len(frames) - 1
         settled = hold.setdefault("settled", set())
         for index, name in enumerate(JOINT_NAMES):
@@ -1300,7 +1320,7 @@ class Arm:
                     settled.add(name)
             distance = frame[index] - position
             lead = leads[index]
-            behind |= abs(distance) > lead
+            behind |= abs(distance) > lead or easing
             goals[name] = position + max(-lead, min(lead, distance))
         validate_pose(tuple(goals[name] for name in JOINT_NAMES), envelope)
         for name in JOINT_NAMES:
