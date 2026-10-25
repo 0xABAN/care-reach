@@ -1105,6 +1105,20 @@ class TaughtMoveTests(DashboardBase):
         self.assertLess(arm.hold["ease"], 1.0)  # 4.9 V: Home eases.
         arm.pose_stop()
 
+    def test_lift_this_does_not_ease_at_5_1_v_from_home(self):
+        bus = TrackingBus(self.HOME)
+        arm = self.taught_arm(bus)
+        self.teach(arm, bus, "lift_this", [self.offset(0, 300, -500, 0, 0, 150)])
+        arm.pose_start("lift_this")
+        start = time.monotonic()
+        arm._advance(start)  # Resting supply: 5.3 V.
+        for step in range(1, 30):
+            bus.voltages = {name: 51 for name in JOINT_NAMES}
+            arm._advance(start + step * 0.05)
+        self.assertEqual(arm.hold.get("ease", 1.0), 1.0)
+        self.assertLess(bus.positions["elbow_flex"], self.HOME[2] - 50)  # It is moving.
+        arm.pose_stop()
+
     def test_stop_cancels_taught_move_and_holds_measured(self):
         bus = TrackingBus(self.HOME)
         arm = self.taught_arm(bus)

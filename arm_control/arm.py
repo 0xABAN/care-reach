@@ -1294,9 +1294,10 @@ class Arm:
             low_voltage = min(snapshot[name]["voltage"] for name in JOINT_NAMES)
             if "rest_voltage" not in hold:
                 hold["rest_voltage"] = low_voltage
-            ceiling = HOME_EASE_RAW if hold["pose"] == "home" else VOLTAGE_EASE_RAW
+            # Taught moves too: easing at 5.1 V left Lift this unable to start
+            # the elbow out of Home (3 ticks in 60 s). Home succeeded at 5.0 V.
             threshold = max(MIN_VOLTAGE_RAW + 1,
-                            min(ceiling, hold["rest_voltage"] - VOLTAGE_EASE_DROP))
+                            min(HOME_EASE_RAW, hold["rest_voltage"] - VOLTAGE_EASE_DROP))
             easing = low_voltage < threshold
             ease = hold.get("ease", 1.0)
             ease = (max(TAUGHT_EASE_MIN, ease * 0.5) if easing
