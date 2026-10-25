@@ -1052,6 +1052,25 @@ class TaughtMoveTests(DashboardBase):
         self.assertIsNone(arm.hold)
         self.assertIsNone(arm.error)
 
+    def test_one_garbled_temperature_reading_does_not_stop_but_real_heat_does(self):
+        bus = FakeBus(self.HOME)
+        arm = self.taught_arm(bus)
+        snapshot = arm._snapshot()
+        snapshot["shoulder_lift"] = {**snapshot["shoulder_lift"], "temperature": 59}
+        arm._check_snapshot(snapshot)  # Fresh read says 24 C: keep going.
+        hot = {name: 24 for name in JOINT_NAMES}
+        hot["shoulder_lift"] = 60
+        original = bus.sync_read
+
+        def hot_read(register, normalize=True, num_retry=0):
+            if register == "Present_Temperature":
+                return hot.copy()
+            return original(register, normalize=normalize, num_retry=num_retry)
+
+        bus.sync_read = hot_read
+        with self.assertRaisesRegex(RuntimeError, "Motor 2 is too hot"):
+            arm._check_snapshot(snapshot)
+
     def test_stop_cancels_taught_move_and_holds_measured(self):
         bus = TrackingBus(self.HOME)
         arm = self.taught_arm(bus)

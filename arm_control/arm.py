@@ -422,7 +422,11 @@ class Arm:
             if need_torque and joint["torque"] != 1:
                 raise RuntimeError(f"Motor {index + 1} torque is off; use Hold all joints first")
             if joint["temperature"] > 55:
-                raise RuntimeError(f"Motor {index + 1} is too hot")
+                # A single garbled reading (32 -> 59 -> 32 C within a second was
+                # seen during a supply dip) must not stop motion; a real
+                # overheat persists on a fresh read.
+                if self._read("Present_Temperature")[name] > 55:
+                    raise RuntimeError(f"Motor {index + 1} is too hot")
             position = joint["position"]
             if not self.firmware_min[name] <= position <= self.firmware_max[name]:
                 raise RuntimeError(f"Motor {index + 1} exceeds firmware position bounds")
